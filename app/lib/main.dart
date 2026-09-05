@@ -18,7 +18,7 @@ class GastosApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Gastos',
+      title: 'Canogasto',
       theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal)),
       home: StreamBuilder<User?>(
         stream: FirebaseAuth.instance.authStateChanges(),

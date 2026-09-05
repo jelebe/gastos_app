@@ -1,7 +1,7 @@
 class TicketLineItem {
   TicketLineItem({required this.textoOriginal, this.precioTotal, this.categoriaId, this.grupo, this.productoNormalizado, this.trackWeight = false, this.pesoGramos});
 
-  final String textoOriginal;
+  String textoOriginal;
   double? precioTotal;
   String? categoriaId;
   String? grupo;
