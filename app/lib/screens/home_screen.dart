@@ -31,8 +31,10 @@ class _HomeScreenState extends State<HomeScreen> {
     _Section.categorias: 'Categorías',
   };
 
-  /// Se cambia cada vez que se guarda o se borra algo, para forzar al
-  /// dashboard (que carga sus datos una vez, no en vivo) a recalcularlos.
+  /// Se cambia cada vez que se guarda o se borra algo, para que el dashboard
+  /// (que carga sus datos una vez, no en vivo) los recalcule. Va como dato y
+  /// no como `Key` a propósito: con una `Key` el widget se recreaba entero y
+  /// perdía el mes que se estuviera mirando.
   int _dashboardTick = 0;
 
   void _refreshDashboard() => setState(() => _dashboardTick++);
@@ -232,7 +234,7 @@ class _HomeScreenState extends State<HomeScreen> {
       body: IndexedStack(
         index: _Section.values.indexOf(_section),
         children: [
-          DashboardTab(key: ValueKey(_dashboardTick), repository: _repository),
+          DashboardTab(repository: _repository, refreshTick: _dashboardTick),
           _TransactionsList(
             repository: _repository,
             tipo: 'ingreso',
@@ -399,6 +401,9 @@ class _TransactionsListState extends State<_TransactionsList> {
   // build(), para no resuscribirse (y parpadear) sin necesidad.
   late final Stream<List<TransactionSummary>> _stream = widget.repository.watchTransactions(widget.tipo);
 
+  /// Persona por la que se está filtrando; `null` es "todas".
+  String? _persona;
+
   @override
   Widget build(BuildContext context) {
     final esIngreso = widget.tipo == 'ingreso';
@@ -428,45 +433,141 @@ class _TransactionsListState extends State<_TransactionsList> {
           );
         }
 
-        return ListView.builder(
-          itemCount: transactions.length,
-          itemBuilder: (context, index) {
-            final tx = transactions[index];
-            final titulo = esIngreso
-                ? (tx.categoriaNombre ?? 'Ingreso')
-                : ((tx.comercio?.trim().isNotEmpty ?? false) ? tx.comercio!.trim() : 'Ticket');
-            final fechaTexto = '${tx.fecha.day}/${tx.fecha.month}/${tx.fecha.year}';
-            final subtitulo = [
-              fechaTexto,
-              if (tx.pagadoPor != null) tx.pagadoPor!,
-              if (!tx.compartido) 'Personal',
-              if (tx.nota != null) tx.nota!,
-            ].join(' · ');
-            return ListTile(
-              title: Text(titulo),
-              subtitle: Text(subtitulo),
-              onTap: () => widget.onEdit(tx),
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
+        // "Ambos" es un valor de pagadoPor como otro cualquiera, así que va
+        // como una opción más del filtro: filtrar por "Cano" enseña lo que
+        // pagó él, no lo que pagaron entre los dos.
+        final visibles = _persona == null
+            ? transactions
+            : transactions.where((tx) => tx.pagadoPor == _persona).toList();
+        final total = visibles.fold<double>(0, (sum, tx) => sum + tx.importeTotal);
+
+        return Column(
+          children: [
+            _PersonFilter(
+              selected: _persona,
+              onChanged: (persona) => setState(() => _persona = persona),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text(
-                    '${esIngreso ? '+' : '-'}${tx.importeTotal.toStringAsFixed(2)} €',
-                    style: TextStyle(
-                      color: esIngreso ? Colors.green : null,
-                      fontWeight: FontWeight.bold,
-                    ),
+                    '${visibles.length} ${_etiquetaCantidad(visibles.length, esIngreso)}',
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.grey),
                   ),
-                  IconButton(
-                    icon: const Icon(Icons.delete_outline, size: 20),
-                    tooltip: esIngreso ? 'Borrar ingreso' : 'Borrar gasto',
-                    onPressed: () => widget.onDelete(tx),
+                  Text(
+                    '${esIngreso ? '+' : '-'}${total.toStringAsFixed(2)} €',
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.bold,
+                          color: esIngreso ? Colors.green : null,
+                        ),
                   ),
                 ],
               ),
-            );
-          },
+            ),
+            if (visibles.isEmpty)
+              Expanded(
+                child: Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Text(
+                      esIngreso
+                          ? 'No hay ingresos de $_persona.'
+                          : 'No hay gastos pagados por $_persona.',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.grey),
+                    ),
+                  ),
+                ),
+              )
+            else
+              Expanded(child: _buildList(visibles, esIngreso)),
+          ],
         );
       },
+    );
+  }
+
+  String _etiquetaCantidad(int cuantos, bool esIngreso) {
+    if (esIngreso) return cuantos == 1 ? 'ingreso' : 'ingresos';
+    return cuantos == 1 ? 'gasto' : 'gastos';
+  }
+
+  Widget _buildList(List<TransactionSummary> transactions, bool esIngreso) {
+    return ListView.builder(
+      itemCount: transactions.length,
+      itemBuilder: (context, index) {
+        final tx = transactions[index];
+        final titulo = esIngreso
+            ? (tx.categoriaNombre ?? 'Ingreso')
+            : ((tx.comercio?.trim().isNotEmpty ?? false) ? tx.comercio!.trim() : 'Ticket');
+        final fechaTexto = '${tx.fecha.day}/${tx.fecha.month}/${tx.fecha.year}';
+        final subtitulo = [
+          fechaTexto,
+          if (tx.pagadoPor != null) tx.pagadoPor!,
+          if (!tx.compartido) 'Personal',
+          if (tx.nota != null) tx.nota!,
+        ].join(' · ');
+        return ListTile(
+          title: Text(titulo),
+          subtitle: Text(subtitulo),
+          onTap: () => widget.onEdit(tx),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                '${esIngreso ? '+' : '-'}${tx.importeTotal.toStringAsFixed(2)} €',
+                style: TextStyle(
+                  color: esIngreso ? Colors.green : null,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.delete_outline, size: 20),
+                tooltip: esIngreso ? 'Borrar ingreso' : 'Borrar gasto',
+                onPressed: () => widget.onDelete(tx),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Filtro de "quién pagó" para las listas de gastos e ingresos.
+class _PersonFilter extends StatelessWidget {
+  const _PersonFilter({required this.selected, required this.onChanged});
+
+  /// `null` = sin filtrar.
+  final String? selected;
+  final ValueChanged<String?> onChanged;
+
+  static const _personas = ['Cano', 'Cana', 'Ambos'];
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      child: Wrap(
+        spacing: 8,
+        children: [
+          ChoiceChip(
+            label: const Text('Todos'),
+            selected: selected == null,
+            onSelected: (_) => onChanged(null),
+          ),
+          for (final persona in _personas)
+            ChoiceChip(
+              label: Text(persona),
+              selected: selected == persona,
+              // Volver a tocar la persona ya elegida quita el filtro, que es
+              // lo que se espera al pulsar algo que ya está marcado.
+              onSelected: (value) => onChanged(value ? persona : null),
+            ),
+        ],
+      ),
     );
   }
 }

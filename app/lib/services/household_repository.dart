@@ -2,11 +2,26 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
 import '../models/category.dart';
+import '../models/dashboard_summary.dart';
 import '../models/ticket_line_item.dart';
 import '../models/transaction_summary.dart';
 import '../utils/text_normalizer.dart';
 
 typedef TicketItemInput = ({String textoOriginal, double precioTotal, Category categoria, double? pesoGramos});
+
+/// Una línea de ticket ya guardada junto a los datos del ticket del que salió,
+/// para poder listar "todo lo gastado en este grupo" sin perder de vista de
+/// qué compra venía cada cosa.
+typedef GroupLine = ({
+  String textoOriginal,
+  String? producto,
+  double precio,
+  double? pesoGramos,
+  DateTime fecha,
+  String? comercio,
+  String? pagadoPor,
+  bool compartido,
+});
 
 Map<String, dynamic> _itemData(TicketItemInput item) {
   final precioPorKilo = (item.categoria.trackWeight && item.pesoGramos != null && item.pesoGramos! > 0)
@@ -20,6 +35,23 @@ Map<String, dynamic> _itemData(TicketItemInput item) {
     'pesoGramos': item.pesoGramos,
     'precioPorKilo': precioPorKilo,
   };
+}
+
+/// La clave de mes ("AAAA-MM") a la que pertenece [fecha]. Es como se guarda
+/// el mes en cada transacción, para poder filtrar por él sin rangos de fecha.
+String mesDe(DateTime fecha) => '${fecha.year}-${fecha.month.toString().padLeft(2, '0')}';
+
+/// El primer día del mes que nombra una clave "AAAA-MM".
+DateTime primerDiaDe(String mes) {
+  final partes = mes.split('-');
+  return DateTime(int.parse(partes[0]), int.parse(partes[1]));
+}
+
+List<MapEntry<String, double>> _ordenadoPorImporte(Map<String, double> totales, {bool quitarVacios = false}) {
+  final entradas = totales.entries.toList();
+  if (quitarVacios) entradas.removeWhere((e) => e.value <= 0);
+  entradas.sort((a, b) => b.value.compareTo(a.value));
+  return [for (final e in entradas) MapEntry(e.key, e.value)];
 }
 
 class AliasMatch {
@@ -167,7 +199,7 @@ class HouseholdRepository {
   }) async {
     final uid = FirebaseAuth.instance.currentUser!.uid;
     final household = await householdRef;
-    final mes = '${fecha.year}-${fecha.month.toString().padLeft(2, '0')}';
+    final mes = mesDe(fecha);
 
     final transactionRef = await household.collection('transactions').add({
       'tipo': 'gasto',
@@ -205,7 +237,7 @@ class HouseholdRepository {
     bool compartido = true,
   }) async {
     final household = await householdRef;
-    final mes = '${fecha.year}-${fecha.month.toString().padLeft(2, '0')}';
+    final mes = mesDe(fecha);
     final transactionRef = household.collection('transactions').doc(transactionId);
 
     await transactionRef.update({
@@ -264,7 +296,7 @@ class HouseholdRepository {
   }) async {
     final uid = FirebaseAuth.instance.currentUser!.uid;
     final household = await householdRef;
-    final mes = '${fecha.year}-${fecha.month.toString().padLeft(2, '0')}';
+    final mes = mesDe(fecha);
 
     await household.collection('transactions').add({
       'tipo': 'ingreso',
@@ -291,7 +323,7 @@ class HouseholdRepository {
     required String pagadoPor,
   }) async {
     final household = await householdRef;
-    final mes = '${fecha.year}-${fecha.month.toString().padLeft(2, '0')}';
+    final mes = mesDe(fecha);
     await household.collection('transactions').doc(id).update({
       'fecha': Timestamp.fromDate(fecha),
       'mes': mes,
@@ -346,134 +378,154 @@ class HouseholdRepository {
     );
   }
 
-  /// Total de gastos o ingresos (según [tipo]) por mes, para los últimos
-  /// [months] meses (incluyendo el actual), en orden cronológico. La clave de
-  /// cada entrada es "AAAA-MM".
-  Future<List<MapEntry<String, double>>> loadMonthlyTotals({required String tipo, int months = 6}) async {
+  /// Todo lo que enseña la pantalla de inicio del mes [mes] ("AAAA-MM"), con
+  /// la tendencia de los [months] meses que acaban en él.
+  ///
+  /// Sale de una única consulta por esa ventana de meses: dentro de ella están
+  /// tanto el mes elegido (para los desgloses) como el anterior (para la
+  /// comparación), así que no hace falta volver a Firestore una vez por
+  /// bloque. Solo se bajan las líneas de los tickets de esos dos meses, que
+  /// son los únicos que se desglosan por categoría; del resto de la ventana
+  /// basta el importe total de cada ticket.
+  Future<DashboardSummary> loadDashboardSummary(String mes, {int months = 6}) async {
     final household = await householdRef;
-    final now = DateTime.now();
-    final meses = List.generate(months, (i) {
-      final d = DateTime(now.year, now.month - (months - 1 - i));
-      return '${d.year}-${d.month.toString().padLeft(2, '0')}';
-    });
+    final fechaMes = primerDiaDe(mes);
+    final mesAnterior = mesDe(DateTime(fechaMes.year, fechaMes.month - 1));
+    final meses = List.generate(
+      months,
+      (i) => mesDe(DateTime(fechaMes.year, fechaMes.month - (months - 1 - i))),
+    );
+    // Con months = 1 el mes anterior se queda fuera de la serie, pero la
+    // comparación lo sigue necesitando.
+    final ventana = {...meses, mesAnterior}.toList();
 
-    final snap = await household.collection('transactions').where('tipo', isEqualTo: tipo).get();
-    final totals = {for (final m in meses) m: 0.0};
-    for (final doc in snap.docs) {
-      final mes = doc.data()['mes'] as String?;
-      if (mes != null && totals.containsKey(mes)) {
-        totals[mes] = totals[mes]! + (doc.data()['importeTotal'] as num).toDouble();
+    final categorias = await loadCategories();
+    final grupoPorCategoriaId = {for (final c in categorias) c.id: c.grupo};
+
+    final txSnap = await household.collection('transactions').where('mes', whereIn: ventana).get();
+
+    // Los tickets cuyas líneas hacen falta: los del mes que se mira y los del
+    // anterior. Se leen todos a la vez, no uno detrás de otro.
+    final docsConLineas = txSnap.docs.where((d) {
+      final data = d.data();
+      return data['tipo'] == 'gasto' && (data['mes'] == mes || data['mes'] == mesAnterior);
+    }).toList();
+    final itemsSnaps = await Future.wait(docsConLineas.map((d) => d.reference.collection('items').get()));
+
+    final gastosPorMes = {for (final m in meses) m: 0.0};
+    final ingresosPorMes = {for (final m in meses) m: 0.0};
+    final porPersona = <String, double>{};
+    final totalPorPersona = {'Cano': 0.0, 'Cana': 0.0};
+
+    for (final doc in txSnap.docs) {
+      final data = doc.data();
+      final mesDoc = data['mes'] as String?;
+      final importe = (data['importeTotal'] as num).toDouble();
+      final esGasto = data['tipo'] == 'gasto';
+
+      if (mesDoc != null) {
+        final serie = esGasto ? gastosPorMes : ingresosPorMes;
+        if (serie.containsKey(mesDoc)) serie[mesDoc] = serie[mesDoc]! + importe;
+      }
+      if (!esGasto || mesDoc != mes) continue;
+
+      // Reparto del gasto compartido: uno marcado como personal (un capricho
+      // que no se reparte) no debe distorsionar quién ha puesto más dinero
+      // para la casa, así que no cuenta aquí.
+      if (data['compartido'] != false) {
+        final persona = data['pagadoPor'] as String? ?? 'Sin especificar';
+        porPersona[persona] = (porPersona[persona] ?? 0) + importe;
+      }
+      // El total de cada uno sí cuenta lo personal, y lo pagado por "Ambos"
+      // se reparte a partes iguales.
+      final persona = data['pagadoPor'] as String?;
+      if (persona == 'Ambos') {
+        totalPorPersona['Cano'] = totalPorPersona['Cano']! + importe / 2;
+        totalPorPersona['Cana'] = totalPorPersona['Cana']! + importe / 2;
+      } else if (totalPorPersona.containsKey(persona)) {
+        totalPorPersona[persona!] = totalPorPersona[persona]! + importe;
       }
     }
-    return meses.map((m) => MapEntry(m, totals[m]!)).toList();
+
+    final gastoPorGrupo = <String, double>{};
+    final gastoPorGrupoAnterior = <String, double>{};
+    for (var i = 0; i < docsConLineas.length; i++) {
+      final esDelMes = docsConLineas[i].data()['mes'] == mes;
+      final destino = esDelMes ? gastoPorGrupo : gastoPorGrupoAnterior;
+      for (final itemDoc in itemsSnaps[i].docs) {
+        final data = itemDoc.data();
+        final grupo = grupoPorCategoriaId[data['categoriaId'] as String?] ?? 'Sin categoría';
+        destino[grupo] = (destino[grupo] ?? 0) + ((data['precioTotal'] as num?)?.toDouble() ?? 0);
+      }
+    }
+
+    final comparacion = [
+      for (final grupo in {...gastoPorGrupo.keys, ...gastoPorGrupoAnterior.keys})
+        (
+          grupo: grupo,
+          actual: gastoPorGrupo[grupo] ?? 0.0,
+          anterior: gastoPorGrupoAnterior[grupo] ?? 0.0,
+        ),
+    ]..sort((a, b) => b.actual.compareTo(a.actual));
+
+    return DashboardSummary(
+      gastosPorMes: [for (final m in meses) MapEntry(m, gastosPorMes[m]!)],
+      ingresosPorMes: [for (final m in meses) MapEntry(m, ingresosPorMes[m]!)],
+      categoryBreakdown: _ordenadoPorImporte(gastoPorGrupo),
+      categoryComparison: comparacion,
+      personBreakdown: _ordenadoPorImporte(porPersona),
+      personTotalSpending: _ordenadoPorImporte(totalPorPersona, quitarVacios: true),
+    );
   }
 
-  /// Gasto del mes [mes] ("AAAA-MM") agrupado por grupo de categoría, de
-  /// mayor a menor. Lee las líneas de cada ticket de ese mes, así que el
-  /// coste crece con el número de tickets del mes (asumible a escala
-  /// doméstica).
-  Future<List<MapEntry<String, double>>> loadCategoryBreakdown(String mes) async {
+  /// Todas las líneas de gasto del mes [mes] ("AAAA-MM") que pertenecen al
+  /// grupo de categoría [grupo], de la más reciente a la más antigua. Es el
+  /// detalle que hay detrás de cada tramo del desglose por categoría de
+  /// [loadDashboardSummary]: las líneas sin categoría conocida caen en "Sin
+  /// categoría", igual que allí.
+  Future<List<GroupLine>> loadGroupLines(String mes, String grupo) async {
     final household = await householdRef;
     final categorias = await loadCategories();
     final grupoPorCategoriaId = {for (final c in categorias) c.id: c.grupo};
 
     final txSnap = await household.collection('transactions').where('mes', isEqualTo: mes).get();
-    final gastoDocs = txSnap.docs.where((d) => d.data()['tipo'] == 'gasto');
-    // Las líneas de cada ticket se leen en paralelo, no una a una, para que
-    // el dashboard no tarde más cuanto más tickets tenga el mes.
+    final gastoDocs = txSnap.docs.where((d) => d.data()['tipo'] == 'gasto').toList();
     final itemsSnaps = await Future.wait(gastoDocs.map((d) => d.reference.collection('items').get()));
 
-    final totals = <String, double>{};
-    for (final itemsSnap in itemsSnaps) {
-      for (final itemDoc in itemsSnap.docs) {
-        final categoriaId = itemDoc.data()['categoriaId'] as String?;
-        final precio = (itemDoc.data()['precioTotal'] as num?)?.toDouble() ?? 0;
-        final grupo = grupoPorCategoriaId[categoriaId] ?? 'Sin categoría';
-        totals[grupo] = (totals[grupo] ?? 0) + precio;
+    final lineas = <GroupLine>[];
+    for (var i = 0; i < gastoDocs.length; i++) {
+      final tx = TransactionSummary.fromFirestore(gastoDocs[i].id, gastoDocs[i].data());
+      for (final itemDoc in itemsSnaps[i].docs) {
+        final data = itemDoc.data();
+        final grupoLinea = grupoPorCategoriaId[data['categoriaId'] as String?] ?? 'Sin categoría';
+        if (grupoLinea != grupo) continue;
+        lineas.add((
+          textoOriginal: data['textoOriginal'] as String? ?? '',
+          producto: data['productoNormalizado'] as String?,
+          precio: (data['precioTotal'] as num?)?.toDouble() ?? 0,
+          pesoGramos: (data['pesoGramos'] as num?)?.toDouble(),
+          fecha: tx.fecha,
+          comercio: tx.comercio,
+          pagadoPor: tx.pagadoPor,
+          compartido: tx.compartido,
+        ));
       }
     }
-    final sorted = totals.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
-    return [for (final e in sorted) MapEntry(e.key, e.value)];
+    lineas.sort((a, b) => b.fecha.compareTo(a.fecha));
+    return lineas;
   }
 
-  /// Gasto del mes [mes] ("AAAA-MM") agrupado por quién pagó, de mayor a
-  /// menor. A diferencia de [loadCategoryBreakdown], "quién pagó" es un dato
-  /// del ticket en sí (no de cada línea), así que no hace falta leer las
-  /// líneas. Solo cuenta el gasto compartido: uno marcado como personal (p.ej.
-  /// un capricho de uno de los dos que no se reparte) no debe distorsionar
-  /// quién ha puesto más dinero para la casa.
-  Future<List<MapEntry<String, double>>> loadPersonBreakdown(String mes) async {
+  /// Los gastos del mes [mes] ("AAAA-MM"), del más reciente al más antiguo.
+  /// Quién pagó y si es compartido son datos del ticket entero, así que el
+  /// resumen basta para poder filtrarlos por persona sin leer sus líneas.
+  Future<List<TransactionSummary>> loadMonthExpenses(String mes) async {
     final household = await householdRef;
-    final txSnap = await household.collection('transactions').where('mes', isEqualTo: mes).get();
-
-    final totals = <String, double>{};
-    for (final doc in txSnap.docs) {
-      final data = doc.data();
-      if (data['tipo'] != 'gasto') continue;
-      if (data['compartido'] == false) continue;
-      final persona = data['pagadoPor'] as String? ?? 'Sin especificar';
-      final importe = (data['importeTotal'] as num).toDouble();
-      totals[persona] = (totals[persona] ?? 0) + importe;
-    }
-    final sorted = totals.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
-    return [for (final e in sorted) MapEntry(e.key, e.value)];
-  }
-
-  /// Total de gasto de cada persona este mes contando TODO gasto (compartido
-  /// y personal): a diferencia de [loadPersonBreakdown], que solo mide el
-  /// reparto del gasto compartido, esto responde "cuánto gasta cada uno en
-  /// total", incluyendo sus caprichos personales. Un gasto pagado por "Ambos"
-  /// se reparte a partes iguales entre las dos personas.
-  Future<List<MapEntry<String, double>>> loadPersonTotalSpending(String mes) async {
-    final household = await householdRef;
-    final txSnap = await household.collection('transactions').where('mes', isEqualTo: mes).get();
-
-    final totals = {'Cano': 0.0, 'Cana': 0.0};
-    for (final doc in txSnap.docs) {
-      final data = doc.data();
-      if (data['tipo'] != 'gasto') continue;
-      final persona = data['pagadoPor'] as String?;
-      final importe = (data['importeTotal'] as num).toDouble();
-      if (persona == 'Ambos') {
-        totals['Cano'] = totals['Cano']! + importe / 2;
-        totals['Cana'] = totals['Cana']! + importe / 2;
-      } else if (totals.containsKey(persona)) {
-        totals[persona!] = totals[persona]! + importe;
-      }
-    }
-    final sorted = totals.entries.toList()
-      ..removeWhere((e) => e.value <= 0)
-      ..sort((a, b) => b.value.compareTo(a.value));
-    return [for (final e in sorted) MapEntry(e.key, e.value)];
-  }
-
-  /// Gasto por categoría del mes [mes] ("AAAA-MM") junto al del mes
-  /// inmediatamente anterior, para poder mostrar la variación en %. Ordenado
-  /// por gasto actual de mayor a menor; solo incluye categorías con gasto
-  /// este mes o el anterior.
-  Future<List<({String grupo, double actual, double anterior})>> loadCategoryComparison(String mes) async {
-    final partes = mes.split('-');
-    final fechaMes = DateTime(int.parse(partes[0]), int.parse(partes[1]));
-    final mesAnterior = DateTime(fechaMes.year, fechaMes.month - 1);
-    final mesAnteriorStr = '${mesAnterior.year}-${mesAnterior.month.toString().padLeft(2, '0')}';
-
-    final resultados = await Future.wait([
-      loadCategoryBreakdown(mes),
-      loadCategoryBreakdown(mesAnteriorStr),
-    ]);
-    final actual = resultados[0];
-    final anteriorPorGrupo = {for (final e in resultados[1]) e.key: e.value};
-
-    final grupos = {...actual.map((e) => e.key), ...anteriorPorGrupo.keys};
-    final comparacion = [
-      for (final grupo in grupos)
-        (
-          grupo: grupo,
-          actual: actual.firstWhere((e) => e.key == grupo, orElse: () => MapEntry(grupo, 0.0)).value,
-          anterior: anteriorPorGrupo[grupo] ?? 0.0,
-        ),
-    ];
-    comparacion.sort((a, b) => b.actual.compareTo(a.actual));
-    return comparacion;
+    final snap = await household.collection('transactions').where('mes', isEqualTo: mes).get();
+    final gastos = snap.docs
+        .map((d) => TransactionSummary.fromFirestore(d.id, d.data()))
+        .where((tx) => tx.tipo == 'gasto')
+        .toList();
+    gastos.sort((a, b) => b.fecha.compareTo(a.fecha));
+    return gastos;
   }
 }

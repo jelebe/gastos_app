@@ -73,10 +73,11 @@ Future<Category?> showCreateCategoryDialog(
   required List<Category> categories,
   required HouseholdRepository repository,
   String prefillNombre = '',
+  String prefillGrupo = '',
   String tipoInicial = 'gasto',
 }) {
   final existingGrupos = {for (final c in categories) c.grupo}.toList()..sort();
-  final grupoController = TextEditingController();
+  final grupoController = TextEditingController(text: prefillGrupo);
   final nombreController = TextEditingController(text: prefillNombre);
   String tipo = tipoInicial;
   bool trackWeight = false;
@@ -99,6 +100,7 @@ Future<Category?> showCreateCategoryDialog(
               ),
               const SizedBox(height: 12),
               Autocomplete<String>(
+                initialValue: TextEditingValue(text: prefillGrupo),
                 optionsBuilder: (v) => v.text.isEmpty
                     ? existingGrupos
                     : existingGrupos.where((g) => normalizeLine(g).contains(normalizeLine(v.text))),
@@ -167,6 +169,13 @@ Future<Category?> showCreateCategoryDialog(
   );
 }
 
+/// Selector en dos pasos: primero la lista de grupos, y al entrar en uno, sus
+/// categorías (con vuelta atrás). Con la lista entera de categorías de golpe
+/// era imposible encontrar nada sin escribir; así se puede llegar a mano.
+///
+/// El buscador sigue estando por encima de los dos niveles: si se busca desde
+/// la lista de grupos se buscan categorías de todos ellos, y si se busca ya
+/// dentro de un grupo, solo dentro de ese.
 class _CategoryPickerSheet extends StatefulWidget {
   const _CategoryPickerSheet({required this.categories, required this.repository, required this.tipo});
 
@@ -182,72 +191,221 @@ class _CategoryPickerSheetState extends State<_CategoryPickerSheet> {
   final _searchController = TextEditingController();
   String _query = '';
 
+  /// Grupo en el que se ha entrado; `null` mientras se ve la lista de grupos.
+  String? _grupo;
+
+  /// Si todas las categorías disponibles caen en un mismo grupo (pasa al
+  /// registrar un ingreso, donde solo hay "Ingresos"), la lista de grupos no
+  /// decide nada: se entra directamente y no se ofrece volver a ella.
+  late final bool _grupoUnico = _grupos.length == 1;
+
+  @override
+  void initState() {
+    super.initState();
+    if (_grupoUnico) _grupo = _grupos.first.nombre;
+  }
+
   @override
   void dispose() {
     _searchController.dispose();
     super.dispose();
   }
 
+  void _openGrupo(String grupo) {
+    _searchController.clear();
+    setState(() {
+      _grupo = grupo;
+      _query = '';
+    });
+  }
+
+  void _backToGrupos() {
+    _searchController.clear();
+    setState(() {
+      _grupo = null;
+      _query = '';
+    });
+  }
+
+  /// Los grupos que existen entre las categorías disponibles, con cuántas
+  /// tiene cada uno, en orden alfabético.
+  List<({String nombre, int cuantas})> get _grupos {
+    final cuenta = <String, int>{};
+    for (final c in widget.categories) {
+      cuenta[c.grupo] = (cuenta[c.grupo] ?? 0) + 1;
+    }
+    final nombres = cuenta.keys.toList()..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    return [for (final n in nombres) (nombre: n, cuantas: cuenta[n]!)];
+  }
+
+  Future<void> _createCategory() async {
+    final created = await showCreateCategoryDialog(
+      context,
+      categories: widget.categories,
+      repository: widget.repository,
+      prefillNombre: _query,
+      prefillGrupo: _grupo ?? '',
+      tipoInicial: widget.tipo,
+    );
+    if (created != null && mounted) Navigator.of(context).pop(created);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final filtered = filterCategories(widget.categories, _query);
+    final buscando = _query.trim().isNotEmpty;
+    // Dentro de un grupo se busca solo en él; desde la lista de grupos, en
+    // todas las categorías (para no obligar a adivinar en qué grupo cae algo).
+    final ambito = _grupo == null ? widget.categories : widget.categories.where((c) => c.grupo == _grupo).toList();
+    final resultados = buscando ? filterCategories(ambito, _query) : ambito;
 
-    return DraggableScrollableSheet(
-      initialChildSize: 0.75,
-      minChildSize: 0.4,
-      maxChildSize: 0.95,
-      expand: false,
-      builder: (context, scrollController) => Padding(
-        padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-              child: TextField(
-                controller: _searchController,
-                autofocus: true,
-                decoration: const InputDecoration(
-                  labelText: 'Buscar categoría',
-                  prefixIcon: Icon(Icons.search),
-                ),
-                onChanged: (value) => setState(() => _query = value),
-              ),
-            ),
-            Expanded(
-              child: ListView.builder(
-                controller: scrollController,
-                itemCount: filtered.length + 1,
-                itemBuilder: (context, index) {
-                  if (index == filtered.length) {
-                    return ListTile(
-                      leading: const Icon(Icons.add),
-                      title: Text(
-                        _query.isEmpty ? 'Crear categoría nueva' : 'Crear "$_query" como categoría nueva',
+    return PopScope(
+      // Estando dentro de un grupo, "atrás" vuelve a la lista de grupos en vez
+      // de cerrar el selector entero.
+      canPop: _grupo == null || _grupoUnico,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) _backToGrupos();
+      },
+      child: DraggableScrollableSheet(
+        initialChildSize: 0.75,
+        minChildSize: 0.4,
+        maxChildSize: 0.95,
+        expand: false,
+        builder: (context, scrollController) => Padding(
+          padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(8, 12, 16, 4),
+                child: Row(
+                  children: [
+                    if (_grupo != null && !_grupoUnico)
+                      IconButton(
+                        icon: const Icon(Icons.arrow_back),
+                        tooltip: 'Volver a los grupos',
+                        onPressed: _backToGrupos,
+                      )
+                    else
+                      const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        _grupo ?? 'Elegir categoría',
+                        style: Theme.of(context).textTheme.titleMedium,
+                        overflow: TextOverflow.ellipsis,
                       ),
-                      onTap: () async {
-                        final created = await showCreateCategoryDialog(
-                          context,
-                          categories: widget.categories,
-                          repository: widget.repository,
-                          prefillNombre: _query,
-                          tipoInicial: widget.tipo,
-                        );
-                        if (created != null && context.mounted) Navigator.of(context).pop(created);
-                      },
-                    );
-                  }
-                  final categoria = filtered[index];
-                  return ListTile(
-                    title: Text(categoria.nombre),
-                    subtitle: Text(categoria.grupo),
-                    onTap: () => Navigator.of(context).pop(categoria),
-                  );
-                },
+                    ),
+                  ],
+                ),
               ),
-            ),
-          ],
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+                child: TextField(
+                  controller: _searchController,
+                  decoration: InputDecoration(
+                    labelText: _grupo == null ? 'Buscar categoría' : 'Buscar en $_grupo',
+                    prefixIcon: const Icon(Icons.search),
+                    isDense: true,
+                  ),
+                  onChanged: (value) => setState(() => _query = value),
+                ),
+              ),
+              Expanded(
+                child: (_grupo == null && !buscando)
+                    ? _GrupoList(grupos: _grupos, controller: scrollController, onTap: _openGrupo)
+                    : _CategoriaList(
+                        categorias: resultados,
+                        controller: scrollController,
+                        mostrarGrupo: _grupo == null,
+                        crearLabel: buscando ? 'Crear "$_query" como categoría nueva' : 'Crear categoría nueva',
+                        onCrear: _createCategory,
+                        onTap: (categoria) => Navigator.of(context).pop(categoria),
+                      ),
+              ),
+            ],
+          ),
         ),
       ),
+    );
+  }
+}
+
+class _GrupoList extends StatelessWidget {
+  const _GrupoList({required this.grupos, required this.controller, required this.onTap});
+
+  final List<({String nombre, int cuantas})> grupos;
+  final ScrollController controller;
+  final ValueChanged<String> onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    if (grupos.isEmpty) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            'Todavía no hay ninguna categoría. Escribe un nombre arriba para crear la primera.',
+            textAlign: TextAlign.center,
+          ),
+        ),
+      );
+    }
+    return ListView.builder(
+      controller: controller,
+      itemCount: grupos.length,
+      itemBuilder: (context, index) {
+        final grupo = grupos[index];
+        return ListTile(
+          leading: const Icon(Icons.folder_outlined),
+          title: Text(grupo.nombre),
+          subtitle: Text('${grupo.cuantas} ${grupo.cuantas == 1 ? 'categoría' : 'categorías'}'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => onTap(grupo.nombre),
+        );
+      },
+    );
+  }
+}
+
+class _CategoriaList extends StatelessWidget {
+  const _CategoriaList({
+    required this.categorias,
+    required this.controller,
+    required this.mostrarGrupo,
+    required this.crearLabel,
+    required this.onCrear,
+    required this.onTap,
+  });
+
+  final List<Category> categorias;
+  final ScrollController controller;
+
+  /// Al buscar desde la lista de grupos los resultados vienen de sitios
+  /// distintos, así que cada uno necesita decir de qué grupo sale; dentro de
+  /// un grupo sobra, porque ya está en la cabecera.
+  final bool mostrarGrupo;
+  final String crearLabel;
+  final VoidCallback onCrear;
+  final ValueChanged<Category> onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView.builder(
+      controller: controller,
+      itemCount: categorias.length + 1,
+      itemBuilder: (context, index) {
+        if (index == categorias.length) {
+          return ListTile(
+            leading: const Icon(Icons.add),
+            title: Text(crearLabel),
+            onTap: onCrear,
+          );
+        }
+        final categoria = categorias[index];
+        return ListTile(
+          title: Text(categoria.nombre),
+          subtitle: mostrarGrupo ? Text(categoria.grupo) : null,
+          onTap: () => onTap(categoria),
+        );
+      },
     );
   }
 }
