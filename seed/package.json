@@ -1,0 +1,11 @@
+{
+  "name": "gastos-app-seed",
+  "private": true,
+  "description": "Script de siembra del hogar y del diccionario inicial de categorias en Firestore",
+  "scripts": {
+    "seed": "node seed.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.0"
+  }
+}
