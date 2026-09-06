@@ -1,6 +1,8 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
+import '../services/saved_credentials.dart';
+
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
 
@@ -15,6 +17,23 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _loading = false;
   String? _error;
 
+  /// Si se recuerdan los datos, se rellenan solos al abrir. No se entra
+  /// automáticamente: si se ha cerrado sesión a propósito, volver a entrar
+  /// solo debe costar un toque, no ser inevitable.
+  bool _recordar = true;
+
+  @override
+  void initState() {
+    super.initState();
+    SavedCredentials.cargar().then((guardadas) {
+      if (guardadas == null || !mounted) return;
+      setState(() {
+        _emailController.text = guardadas.correo;
+        _passwordController.text = guardadas.password;
+      });
+    });
+  }
+
   Future<void> _signIn() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() {
@@ -26,6 +45,16 @@ class _LoginScreenState extends State<LoginScreen> {
         email: _emailController.text.trim(),
         password: _passwordController.text,
       );
+      // Solo se guardan después de que Firebase los dé por buenos: recordar
+      // una contraseña equivocada sería peor que no recordar ninguna.
+      if (_recordar) {
+        await SavedCredentials.guardar(
+          correo: _emailController.text.trim(),
+          password: _passwordController.text,
+        );
+      } else {
+        await SavedCredentials.borrar();
+      }
     } on FirebaseAuthException catch (e) {
       setState(() => _error = e.message ?? 'No se ha podido iniciar sesión.');
     } finally {
@@ -70,7 +99,15 @@ class _LoginScreenState extends State<LoginScreen> {
                     validator: (value) =>
                         (value == null || value.isEmpty) ? 'Introduce tu contraseña' : null,
                   ),
-                  const SizedBox(height: 20),
+                  const SizedBox(height: 4),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    title: const Text('Recordar mis datos en este móvil'),
+                    value: _recordar,
+                    onChanged: _loading ? null : (v) => setState(() => _recordar = v ?? false),
+                  ),
+                  const SizedBox(height: 12),
                   if (_error != null) ...[
                     Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
                     const SizedBox(height: 12),

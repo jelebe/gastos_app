@@ -7,6 +7,7 @@ import '../models/transaction_summary.dart';
 import '../services/household_repository.dart';
 import '../widgets/add_income_sheet.dart';
 import '../widgets/category_picker_sheet.dart';
+import '../widgets/update_dialog.dart';
 import 'capture_screen.dart';
 import 'confirm_ticket_screen.dart';
 import 'dashboard_tab.dart';
@@ -23,6 +24,17 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final _repository = HouseholdRepository();
   _Section _section = _Section.inicio;
+
+  @override
+  void initState() {
+    super.initState();
+    // Se mira si hay versión nueva al entrar, una vez por arranque. Va tras
+    // el primer frame porque necesita un contexto con Navigator montado, y no
+    // se espera: si no hay red, la app sigue como si nada.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) maybeShowUpdateDialog(context);
+    });
+  }
 
   static const _titulos = {
     _Section.inicio: 'Inicio',

@@ -32,9 +32,14 @@ android {
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
+            // Se firma con las claves de debug a propósito: la app no se
+            // publica, solo se instala a mano en los móviles de la casa. Para
+            // subirla a Play Store haría falta un keystore propio.
             signingConfig = signingConfigs.getByName("debug")
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 }
