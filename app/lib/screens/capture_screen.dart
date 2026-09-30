@@ -5,9 +5,9 @@ import 'package:flutter/material.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:image_picker/image_picker.dart';
 
-import '../models/category.dart';
 import '../models/ticket_line_item.dart';
 import '../services/household_repository.dart';
+import '../utils/product_classifier.dart';
 import '../utils/ticket_parser.dart';
 import 'confirm_ticket_screen.dart';
 
@@ -44,9 +44,17 @@ class _CaptureScreenState extends State<CaptureScreen> {
       }
       imagePath = photo.path;
 
+      // Categorías y lo aprendido se piden ya, mientras se lee la foto.
+      final datos = (widget.repository.loadCategories(), widget.repository.loadLearnedLines()).wait;
+      // Si fallan antes de llegar a esperarlos, que no quede como error suelto:
+      // ya se recoge abajo, en el await.
+      datos.ignore();
+
       final recognizer = TextRecognizer(script: TextRecognitionScript.latin);
       final result = await recognizer.processImage(InputImage.fromFilePath(imagePath));
       await recognizer.close();
+      // Con el texto ya extraído la foto sobra: se borra ya.
+      await _borrarImagen(imagePath);
 
       // `result.text` concatena el texto por "bloques" tal y como los agrupa
       // ML Kit, que no siempre coincide con el orden real de las filas del
@@ -55,13 +63,19 @@ class _CaptureScreenState extends State<CaptureScreen> {
       // lectura a partir de la posición (x, y) de cada línea reconocida.
       final rawText = _reconstructReadingOrder(result);
 
-      final categories = await widget.repository.loadCategories();
-      final items = await _buildLineItems(rawText, categories);
+      final (categories, aprendidas) = await datos;
+      final (:items, :descartadas) =
+          _buildLineItems(rawText, ProductClassifier(categorias: categories, aprendidas: aprendidas));
 
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(
-          builder: (_) => ConfirmTicketScreen(repository: widget.repository, items: items),
+          builder: (_) => ConfirmTicketScreen(
+            repository: widget.repository,
+            items: items,
+            descartadas: descartadas,
+            esEscaneo: true,
+          ),
         ),
       );
     } catch (e) {
@@ -69,11 +83,13 @@ class _CaptureScreenState extends State<CaptureScreen> {
     } finally {
       // La imagen nunca se sube ni se guarda: se borra en cuanto se ha
       // extraído el texto, incluso si algo falla por el camino.
-      if (imagePath != null) {
-        final file = File(imagePath);
-        if (await file.exists()) await file.delete();
-      }
+      if (imagePath != null) await _borrarImagen(imagePath);
     }
+  }
+
+  Future<void> _borrarImagen(String path) async {
+    final file = File(path);
+    if (await file.exists()) await file.delete();
   }
 
   /// Reconstruye el texto del ticket en su orden visual real (arriba a
@@ -112,28 +128,45 @@ class _CaptureScreenState extends State<CaptureScreen> {
     }).join('\n');
   }
 
-  Future<List<TicketLineItem>> _buildLineItems(String rawText, List<Category> categories) async {
+  /// Convierte el texto en líneas y le pone a cada una la categoría que
+  /// propone el clasificador. Las que se parecen a algo que ya se quitó otras
+  /// veces (total, forma de pago...) van aparte, en [descartadas], para poder
+  /// recuperarlas si no tocaba.
+  ({List<TicketLineItem> items, List<TicketLineItem> descartadas}) _buildLineItems(
+    String rawText,
+    ProductClassifier clasificador,
+  ) {
     final items = <TicketLineItem>[];
+    final descartadas = <TicketLineItem>[];
     for (final parsed in parseReceiptLines(rawText)) {
+      final alPeso = parsed.pesoGramos != null;
       final item = TicketLineItem(
         textoOriginal: parsed.descripcion,
+        textoEscaneado: parsed.descripcion,
         precioTotal: parsed.precioTotal,
         pesoGramos: parsed.pesoGramos,
+        alPeso: alPeso,
         // Si el ticket trae un peso detectado, mostramos el campo de peso
         // desde ya; en cuanto se asigne categoría, su trackWeight manda.
-        trackWeight: parsed.pesoGramos != null,
+        trackWeight: alPeso,
       );
 
-      final match = await widget.repository.matchLine(parsed.descripcion, categories);
-      if (match != null) {
-        item.categoriaId = match.categoria.id;
-        item.grupo = match.categoria.grupo;
-        item.productoNormalizado = match.categoria.nombre;
-        item.trackWeight = match.categoria.trackWeight;
+      final guess = clasificador.classify(parsed.descripcion, alPeso: alPeso);
+      if (guess != null && guess.noProducto) {
+        descartadas.add(item);
+        continue;
+      }
+      final categoria = guess?.categoria;
+      if (categoria != null) {
+        item.categoriaId = categoria.id;
+        item.grupo = categoria.grupo;
+        item.productoNormalizado = categoria.nombre;
+        item.trackWeight = categoria.trackWeight;
+        if (guess!.certeza == Certeza.probable) item.categoriaIdSugerida = categoria.id;
       }
       items.add(item);
     }
-    return items;
+    return (items: items, descartadas: descartadas);
   }
 
   @override

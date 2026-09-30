@@ -3,6 +3,9 @@ import 'package:flutter/material.dart';
 import '../models/category.dart';
 import '../models/ticket_line_item.dart';
 import '../services/household_repository.dart';
+import '../utils/formato.dart';
+import '../widgets/store_picker_sheet.dart';
+import '../utils/product_classifier.dart';
 import '../utils/text_normalizer.dart';
 import '../widgets/category_picker_sheet.dart';
 
@@ -17,6 +20,8 @@ class ConfirmTicketScreen extends StatefulWidget {
     this.comentarioInicial,
     this.pagadoPorInicial,
     this.compartidoInicial = true,
+    this.descartadas = const [],
+    this.esEscaneo = false,
   });
 
   final HouseholdRepository repository;
@@ -31,6 +36,15 @@ class ConfirmTicketScreen extends StatefulWidget {
   final String? pagadoPorInicial;
   final bool compartidoInicial;
 
+  /// Líneas quitadas al escanear porque se parecen a otras que ya se quitaron
+  /// antes (total, forma de pago...). Se enseñan aparte por si alguna sí era
+  /// un producto.
+  final List<TicketLineItem> descartadas;
+
+  /// Viene de escanear un ticket: al guardar, además de las categorías, se
+  /// aprende qué líneas no eran productos (las borradas y las no recuperadas).
+  final bool esEscaneo;
+
   bool get isEditing => transactionId != null;
 
   @override
@@ -39,7 +53,11 @@ class ConfirmTicketScreen extends StatefulWidget {
 
 class _ConfirmTicketScreenState extends State<ConfirmTicketScreen> {
   final List<TicketLineItem> _items = [];
-  late final _comercioController = TextEditingController(text: widget.comercioInicial);
+  late final List<TicketLineItem> _descartadas = [...widget.descartadas];
+  /// La tienda elegida de la lista del hogar. Se elige, no se escribe: es lo
+  /// que hace que el nombre sea siempre el mismo y se puedan comparar precios
+  /// entre tiendas después.
+  late String? _comercio = widget.comercioInicial;
   late final _comentarioController = TextEditingController(text: widget.comentarioInicial);
   late DateTime _fecha = widget.fechaInicial ?? DateTime.now();
   late String? _pagadoPor = widget.pagadoPorInicial;
@@ -55,6 +73,29 @@ class _ConfirmTicketScreenState extends State<ConfirmTicketScreen> {
   }
 
   double get _total => _items.fold(0, (sum, item) => sum + (item.precioTotal ?? 0));
+
+  /// Devuelve al ticket líneas que se habían quitado.
+  void _recuperar(List<TicketLineItem> lineas) {
+    final copia = [...lineas];
+    setState(() {
+      _descartadas.removeWhere(copia.contains);
+      _items.addAll(copia);
+    });
+  }
+
+  /// Lo que se aprende al guardar: la categoría de cada línea y, si viene de
+  /// escanear, qué líneas no eran productos.
+  ///
+  /// Como "no producto" solo cuentan las borradas que no tenían categoría: si
+  /// una tenía y aun así se borra, lo normal es que fuera un producto repetido
+  /// por el escáner o que no se quería apuntar, no basura del ticket.
+  List<LineToLearn> _lineasParaAprender() => [
+        for (final item in _items)
+          if (item.isCategorized) (texto: item.textoParaAprender, alPeso: item.alPeso, decision: item.categoriaId!),
+        if (widget.esEscaneo)
+          for (final item in [..._descartadas, ...widget.items.where((i) => !_items.contains(i) && !i.isCategorized)])
+            (texto: item.textoParaAprender, alPeso: item.alPeso, decision: LearnedLine.noProducto),
+      ];
 
   Future<void> _pickCategory(TicketLineItem item) async {
     final categoria = await showCategoryPicker(context, categories: _categories, repository: widget.repository);
@@ -80,6 +121,13 @@ class _ConfirmTicketScreenState extends State<ConfirmTicketScreen> {
     if (!_categories.any((c) => c.id == categoria.id)) {
       setState(() => _categories = [..._categories, categoria]);
     }
+  }
+
+  Future<void> _pickStore() async {
+    final elegido = await showStorePicker(context, repository: widget.repository, actual: _comercio);
+    // Nulo es cerrar sin tocar nada; un StoreChoice con nombre nulo es haber
+    // elegido "sin tienda", que sí borra la que hubiera.
+    if (elegido != null) setState(() => _comercio = elegido.nombre);
   }
 
   Future<void> _pickDate() async {
@@ -113,19 +161,18 @@ class _ConfirmTicketScreenState extends State<ConfirmTicketScreen> {
 
     setState(() => _saving = true);
     try {
-      final toSave = <TicketItemInput>[];
-      for (final item in _items) {
-        final categoria = _categories.firstWhere((c) => c.id == item.categoriaId);
-        toSave.add((
-          textoOriginal: item.textoOriginal,
-          precioTotal: item.precioTotal!,
-          categoria: categoria,
-          pesoGramos: item.pesoGramos,
-        ));
-        await widget.repository.learnAlias(rawText: item.textoOriginal, categoria: categoria);
-      }
+      final toSave = <TicketItemInput>[
+        for (final item in _items)
+          (
+            textoOriginal: item.textoOriginal,
+            precioTotal: item.precioTotal!,
+            categoria: _categories.firstWhere((c) => c.id == item.categoriaId),
+            pesoGramos: item.pesoGramos,
+          ),
+      ];
+      await widget.repository.learnLines(_lineasParaAprender());
 
-      final comercio = _comercioController.text.trim().isEmpty ? null : _comercioController.text.trim();
+      final comercio = (_comercio?.trim().isEmpty ?? true) ? null : _comercio!.trim();
       final comentario = _comentarioController.text.trim().isEmpty ? null : _comentarioController.text.trim();
       if (widget.isEditing) {
         await widget.repository.updateTicket(
@@ -161,7 +208,6 @@ class _ConfirmTicketScreenState extends State<ConfirmTicketScreen> {
 
   @override
   void dispose() {
-    _comercioController.dispose();
     _comentarioController.dispose();
     super.dispose();
   }
@@ -173,10 +219,18 @@ class _ConfirmTicketScreenState extends State<ConfirmTicketScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          TextField(
-            controller: _comercioController,
-            textCapitalization: TextCapitalization.sentences,
-            decoration: const InputDecoration(labelText: 'Tienda (opcional)'),
+          InkWell(
+            onTap: _pickStore,
+            child: InputDecorator(
+              decoration: const InputDecoration(
+                labelText: 'Tienda (opcional)',
+                suffixIcon: Icon(Icons.storefront_outlined),
+              ),
+              child: Text(
+                _comercio ?? 'Elegir tienda',
+                style: _comercio == null ? const TextStyle(color: Colors.grey) : null,
+              ),
+            ),
           ),
           const SizedBox(height: 12),
           InkWell(
@@ -215,6 +269,23 @@ class _ConfirmTicketScreenState extends State<ConfirmTicketScreen> {
           const SizedBox(height: 20),
           Text('Líneas del ticket', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
+          if (_items.any((i) => i.sugerida))
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(
+                children: [
+                  Icon(Icons.lightbulb_outline, size: 18, color: Colors.amber.shade800),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Las marcadas con la bombilla son una propuesta por parecido: revísalas, porque al guardar '
+                      'se aprenden para la próxima vez.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           if (_items.isEmpty)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 12),
@@ -232,6 +303,7 @@ class _ConfirmTicketScreenState extends State<ConfirmTicketScreen> {
             onChangedPeso: (v) => setState(() => item.pesoGramos = v),
             onDelete: () => setState(() => _items.remove(item)),
           ),
+          if (_descartadas.isNotEmpty) _DescartadasCard(lineas: _descartadas, onRecuperar: _recuperar),
           const SizedBox(height: 8),
           OutlinedButton.icon(
             onPressed: () => setState(() => _items.add(TicketLineItem(textoOriginal: ''))),
@@ -240,7 +312,7 @@ class _ConfirmTicketScreenState extends State<ConfirmTicketScreen> {
           ),
           const SizedBox(height: 16),
           Text(
-            'Total: ${_total.toStringAsFixed(2)} €',
+            'Total: ${euros(_total)}',
             style: Theme.of(context).textTheme.titleLarge,
             textAlign: TextAlign.right,
           ),
@@ -251,6 +323,45 @@ class _ConfirmTicketScreenState extends State<ConfirmTicketScreen> {
                 ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
                 : Text(widget.isEditing ? 'Guardar cambios' : 'Guardar ticket'),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Líneas quitadas al escanear, plegadas para no estorbar, con opción de
+/// recuperarlas una a una o todas.
+class _DescartadasCard extends StatelessWidget {
+  const _DescartadasCard({required this.lineas, required this.onRecuperar});
+
+  final List<TicketLineItem> lineas;
+  final ValueChanged<List<TicketLineItem>> onRecuperar;
+
+  @override
+  Widget build(BuildContext context) {
+    final n = lineas.length;
+    final textTheme = Theme.of(context).textTheme;
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: ExpansionTile(
+        leading: const Icon(Icons.filter_alt_outlined),
+        title: Text(n == 1 ? 'Se ha quitado 1 línea' : 'Se han quitado $n líneas'),
+        subtitle: const Text('Se parecen a otras que ya quitaste. Recupera las que sí sean productos.'),
+        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 8, 8),
+        children: [
+          for (final linea in lineas)
+            Row(
+              children: [
+                Expanded(child: Text(linea.textoOriginal, style: textTheme.bodySmall)),
+                if (linea.precioTotal != null) Text(euros(linea.precioTotal!), style: textTheme.bodySmall),
+                TextButton(onPressed: () => onRecuperar([linea]), child: const Text('Recuperar')),
+              ],
+            ),
+          if (n > 1)
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(onPressed: () => onRecuperar(lineas), child: const Text('Recuperar todas')),
+            ),
         ],
       ),
     );
@@ -305,9 +416,12 @@ class _LineItemCard extends StatelessWidget {
               crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 ActionChip(
-                  avatar: Icon(item.isCategorized ? Icons.check_circle : Icons.error_outline,
-                      size: 18, color: item.isCategorized ? Colors.green : Colors.orange),
+                  avatar: item.sugerida
+                      ? Icon(Icons.lightbulb_outline, size: 18, color: Colors.amber.shade800)
+                      : Icon(item.isCategorized ? Icons.check_circle : Icons.error_outline,
+                          size: 18, color: item.isCategorized ? Colors.green : Colors.orange),
                   label: Text(item.isCategorized ? '${item.grupo} · ${item.productoNormalizado}' : 'Elegir categoría'),
+                  tooltip: item.sugerida ? 'Propuesta por parecido: revísala' : null,
                   onPressed: onTapCategory,
                 ),
                 SizedBox(

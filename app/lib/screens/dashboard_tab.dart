@@ -1,10 +1,13 @@
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 
+import '../models/basket_inflation.dart';
 import '../models/dashboard_summary.dart';
+import '../models/product_summary.dart';
 import '../models/ticket_line_item.dart';
 import '../models/transaction_summary.dart';
 import '../services/household_repository.dart';
+import '../utils/formato.dart';
 
 /// Paleta categórica de referencia (orden fijo, nunca se reordena ni se
 /// genera un color nuevo para una serie de más: a partir de la 8ª se pliega
@@ -56,20 +59,15 @@ class DashboardTab extends StatefulWidget {
 }
 
 class _DashboardTabState extends State<DashboardTab> {
-  /// Primer día del mes que se está mirando.
-  late DateTime _mes = _mesEnCurso;
+  /// El mes contable que se está mirando, o nulo para el que corre ahora.
+  ///
+  /// Nulo y no el mes del calendario: cuál es "el mes de ahora" depende de
+  /// cuándo entró la última nómina, y eso solo lo sabe el repositorio. La
+  /// pantalla lo recibe ya resuelto en [DashboardSummary.mes].
+  String? _mes;
   late Future<DashboardSummary> _future = _load();
 
-  static DateTime get _mesEnCurso {
-    final now = DateTime.now();
-    return DateTime(now.year, now.month);
-  }
-
-  /// No se puede avanzar más allá del mes en curso: del futuro no hay nada
-  /// que enseñar.
-  bool get _esMesEnCurso => !_mes.isBefore(_mesEnCurso);
-
-  Future<DashboardSummary> _load() => widget.repository.loadDashboardSummary(mesDe(_mes));
+  Future<DashboardSummary> _load() => widget.repository.loadDashboardSummary(_mes);
 
   @override
   void didUpdateWidget(covariant DashboardTab oldWidget) {
@@ -83,14 +81,17 @@ class _DashboardTabState extends State<DashboardTab> {
 
   void _volverAlMesEnCurso() {
     setState(() {
-      _mes = _mesEnCurso;
+      _mes = null;
       _future = _load();
     });
   }
 
-  void _cambiarMes(int deltaMeses) {
+  /// Se mueve [deltaMeses] desde [mesActual], que viene del resumen ya
+  /// cargado: mientras no lo esté, no hay flechas que pulsar.
+  void _cambiarMes(String mesActual, int deltaMeses) {
+    final primero = primerDiaDe(mesActual);
     setState(() {
-      _mes = DateTime(_mes.year, _mes.month + deltaMeses);
+      _mes = mesDe(DateTime(primero.year, primero.month + deltaMeses));
       _future = _load();
     });
   }
@@ -108,8 +109,6 @@ class _DashboardTabState extends State<DashboardTab> {
 
   @override
   Widget build(BuildContext context) {
-    final mes = mesDe(_mes);
-    final etiqueta = _etiquetaMes(_mes);
     return RefreshIndicator(
       onRefresh: _refresh,
       child: FutureBuilder<DashboardSummary>(
@@ -122,28 +121,37 @@ class _DashboardTabState extends State<DashboardTab> {
             return const Center(child: CircularProgressIndicator());
           }
           final data = snapshot.data!;
+          final mes = data.mes;
+          final etiqueta = _etiquetaMes(primerDiaDe(mes));
           return ListView(
             padding: const EdgeInsets.all(16),
             children: [
               _MonthSelector(
                 etiqueta: etiqueta,
-                onAnterior: () => _cambiarMes(-1),
-                onSiguiente: _esMesEnCurso ? null : () => _cambiarMes(1),
-                onHoy: _esMesEnCurso ? null : _volverAlMesEnCurso,
+                onAnterior: () => _cambiarMes(mes, -1),
+                onSiguiente: data.esMesEnCurso ? null : () => _cambiarMes(mes, 1),
+                onHoy: data.esMesEnCurso ? null : _volverAlMesEnCurso,
               ),
-              const SizedBox(height: 16),
+              _TramoDelMes(
+                desde: data.desde,
+                hasta: data.ultimoDia,
+                segunNomina: data.inicioSegunNomina,
+              ),
+              const SizedBox(height: 12),
               _KpiRow(gasto: data.gastoDelMes, ingreso: data.ingresoDelMes, balance: data.balance),
               const SizedBox(height: 28),
               Text('Gasto por categoría', style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 4),
               const Text(
-                'Toca una categoría para ver qué se ha comprado en ella.',
+                'Toca una categoría para ver qué se ha comprado en ella, o "Resto" para las que no caben.',
                 style: TextStyle(color: _mutedInk, fontSize: 12),
               ),
               const SizedBox(height: 12),
               _CategoryBreakdown(
                 entries: data.categoryBreakdown,
                 onTapEntry: (grupo) => _showGroupDetail(context, widget.repository, mes, etiqueta, grupo),
+                onTapResto: (plegadas) =>
+                    _showRestoDetail(context, widget.repository, mes, etiqueta, plegadas),
               ),
               const SizedBox(height: 28),
               Text('Reparto del gasto compartido', style: Theme.of(context).textTheme.titleMedium),
@@ -192,6 +200,27 @@ class _DashboardTabState extends State<DashboardTab> {
               const SizedBox(height: 12),
               _MonthlyTrendChart(gastos: data.gastosPorMes, ingresos: data.ingresosPorMes),
               const SizedBox(height: 28),
+              Text('Precios de tu cesta', style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 4),
+              const Text(
+                'Cuánto ha subido lo que compras, con tus propios tickets.',
+                style: TextStyle(color: _mutedInk, fontSize: 12),
+              ),
+              const SizedBox(height: 8),
+              // Se abre a petición y no se carga con la pantalla: necesita las
+              // líneas de los tickets de seis meses, que es mucho más de lo que
+              // cuesta el resto del resumen junto.
+              Card(
+                margin: EdgeInsets.zero,
+                child: ListTile(
+                  leading: const Icon(Icons.trending_up),
+                  title: const Text('Ver cómo han cambiado tus precios'),
+                  subtitle: const Text('Comparando los últimos 3 meses con los 3 anteriores'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => _showInflationDetail(context, widget.repository, mes),
+                ),
+              ),
+              const SizedBox(height: 28),
               Text('Últimos movimientos', style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 8),
               _RecentMovements(repository: widget.repository),
@@ -199,6 +228,34 @@ class _DashboardTabState extends State<DashboardTab> {
           );
         },
       ),
+    );
+  }
+}
+
+/// Qué días entran en el mes que se está mirando.
+///
+/// Sale a la vista porque el mes arranca con la nómina y no el día 1, así que
+/// sin decirlo los totales parecerían mal cuadrados. Si de ese mes no hay
+/// nómina guardada se avisa de que el tramo es una estimación.
+class _TramoDelMes extends StatelessWidget {
+  const _TramoDelMes({required this.desde, required this.hasta, required this.segunNomina});
+
+  final DateTime desde;
+
+  /// El último día que entra, ya incluido.
+  final DateTime hasta;
+  final bool segunNomina;
+
+  static String _dia(DateTime fecha) => '${fecha.day} ${_mesesCorto[fecha.month - 1].toLowerCase()}';
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      [
+        'Del ${_dia(desde)} al ${_dia(hasta)}',
+        if (!segunNomina) 'estimado, sin nómina guardada',
+      ].join(' · '),
+      style: const TextStyle(color: _mutedInk, fontSize: 12),
     );
   }
 }
@@ -297,7 +354,7 @@ class _StatTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final texto = '${signed && value > 0 ? '+' : ''}${value.toStringAsFixed(2)} €';
+    final texto = euros(value, conSigno: signed);
     return Card(
       margin: EdgeInsets.zero,
       child: Padding(
@@ -308,11 +365,14 @@ class _StatTile extends StatelessWidget {
           children: [
             Text(label, style: const TextStyle(color: _mutedInk, fontSize: 12)),
             const SizedBox(height: 6),
-            Text(
-              texto,
-              style: TextStyle(color: color, fontSize: 18, fontWeight: FontWeight.bold),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(
+                texto,
+                style: TextStyle(color: color, fontSize: 18, fontWeight: FontWeight.bold),
+                maxLines: 1,
+              ),
             ),
           ],
         ),
@@ -325,13 +385,18 @@ class _StatTile extends StatelessWidget {
 /// leyenda con importe y porcentaje directamente etiquetados.
 ///
 /// Si se pasa [onTapEntry], cada fila de la leyenda se puede tocar para ver
-/// el detalle de lo que hay detrás. El tramo "Otros" no: no es una categoría
-/// real, sino la suma de todas las que no caben en la barra.
+/// el detalle de lo que hay detrás. El tramo "Resto" no lleva a un detalle
+/// suyo, porque no es una categoría real: con [onTapResto] se abre la lista de
+/// las que ha plegado.
 class _CategoryBreakdown extends StatelessWidget {
-  const _CategoryBreakdown({required this.entries, this.onTapEntry});
+  const _CategoryBreakdown({required this.entries, this.onTapEntry, this.onTapResto});
 
   final List<MapEntry<String, double>> entries;
   final ValueChanged<String>? onTapEntry;
+
+  /// Recibe las entradas que no han cabido en la barra, ya plegadas en
+  /// "Resto", para poder enseñarlas aparte.
+  final ValueChanged<List<MapEntry<String, double>>>? onTapResto;
 
   static const _maxSlots = 7;
 
@@ -342,14 +407,16 @@ class _CategoryBreakdown extends StatelessWidget {
     }
 
     // "esAgregado" marca el tramo que agrupa a las categorías que no caben en
-    // la barra: no se puede abrir su detalle. Va como bandera y no por su
-    // nombre porque existe un grupo de categorías llamado "Otros" de verdad.
+    // la barra. Va como bandera y no por su nombre: se llama "Resto" y no
+    // "Otros" precisamente porque existe un grupo de categorías llamado
+    // "Otros" de verdad, y confundirlos era fácil.
     final visibles = [
       for (final e in entries.take(_maxSlots)) (key: e.key, value: e.value, esAgregado: false),
     ];
-    if (entries.length > _maxSlots) {
-      final restoTotal = entries.skip(_maxSlots).fold<double>(0, (sum, e) => sum + e.value);
-      visibles.add((key: 'Otros', value: restoTotal, esAgregado: true));
+    final plegadas = entries.skip(_maxSlots).toList();
+    if (plegadas.isNotEmpty) {
+      final restoTotal = plegadas.fold<double>(0, (sum, e) => sum + e.value);
+      visibles.add((key: 'Resto', value: restoTotal, esAgregado: true));
     }
     final total = visibles.fold<double>(0, (sum, e) => sum + e.value);
 
@@ -380,9 +447,12 @@ class _CategoryBreakdown extends StatelessWidget {
             label: visibles[i].key,
             value: visibles[i].value,
             porcentaje: total <= 0 ? 0 : visibles[i].value / total * 100,
-            onTap: (onTapEntry == null || visibles[i].esAgregado)
-                ? null
-                : () => onTapEntry!(visibles[i].key),
+            onTap: switch (visibles[i].esAgregado) {
+              // El agregado abre la lista de lo que ha plegado, no un detalle
+              // propio que no existe.
+              true => onTapResto == null ? null : () => onTapResto!(plegadas),
+              false => onTapEntry == null ? null : () => onTapEntry!(visibles[i].key),
+            },
           ),
       ],
     );
@@ -419,7 +489,7 @@ class _LegendRow extends StatelessWidget {
           const SizedBox(width: 8),
           Expanded(child: Text(label, overflow: TextOverflow.ellipsis)),
           Text(
-            '${value.toStringAsFixed(2)} € · ${porcentaje.toStringAsFixed(0)}%',
+            '${euros(value)} · ${porcentaje.toStringAsFixed(0)}%',
             style: const TextStyle(color: _secondaryInk, fontWeight: FontWeight.w600),
           ),
           if (onTap != null) const Icon(Icons.chevron_right, size: 18, color: _mutedInk),
@@ -454,7 +524,7 @@ class _CategoryComparison extends StatelessWidget {
             child: Row(
               children: [
                 Expanded(child: Text(e.grupo, overflow: TextOverflow.ellipsis)),
-                Text('${e.actual.toStringAsFixed(2)} €', style: const TextStyle(color: _secondaryInk)),
+                Text(euros(e.actual), style: const TextStyle(color: _secondaryInk)),
                 const SizedBox(width: 12),
                 SizedBox(width: 56, child: _DeltaBadge(actual: e.actual, anterior: e.anterior)),
               ],
@@ -543,7 +613,7 @@ class _MonthlyTrendChart extends StatelessWidget {
               barTouchData: BarTouchData(
                 touchTooltipData: BarTouchTooltipData(
                   getTooltipItem: (group, groupIndex, rod, rodIndex) => BarTooltipItem(
-                    '${rod.toY.toStringAsFixed(2)} €',
+                    euros(rod.toY),
                     const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
                   ),
                 ),
@@ -641,14 +711,19 @@ class _RecentMovementsState extends State<_RecentMovements> {
                 contentPadding: EdgeInsets.zero,
                 dense: true,
                 onTap: () => _showMovementDetail(context, widget.repository, m),
-                title: Text(
-                  m.tipo == 'ingreso' ? (m.categoriaNombre ?? 'Ingreso') : ((m.comercio?.trim().isNotEmpty ?? false) ? m.comercio!.trim() : 'Ticket'),
+                title: Text(m.titulo),
+                subtitle: Text(
+                  [
+                    '${m.fecha.day}/${m.fecha.month}/${m.fecha.year}',
+                    if (m.esLiquidacion) '${m.de} → ${m.para}',
+                  ].join(' · '),
                 ),
-                subtitle: Text('${m.fecha.day}/${m.fecha.month}/${m.fecha.year}'),
                 trailing: Text(
-                  '${m.tipo == 'ingreso' ? '+' : '-'}${m.importeTotal.toStringAsFixed(2)} €',
+                  // Una liquidación va sin signo: no suma ni resta al gasto
+                  // del mes, solo cambia el dinero de bolsillo.
+                  '${m.esLiquidacion ? '' : (m.tipo == 'ingreso' ? '+' : '-')}${euros(m.importeTotal)}',
                   style: TextStyle(
-                    color: m.tipo == 'ingreso' ? _successGreen : null,
+                    color: m.esLiquidacion ? _mutedInk : (m.tipo == 'ingreso' ? _successGreen : null),
                     fontWeight: FontWeight.bold,
                   ),
                 ),
@@ -664,16 +739,17 @@ class _RecentMovementsState extends State<_RecentMovements> {
 /// gasto, o la categoría y la nota si es un ingreso.
 Future<void> _showMovementDetail(BuildContext context, HouseholdRepository repository, TransactionSummary tx) async {
   final esIngreso = tx.tipo == 'ingreso';
+  // Solo los tickets tienen líneas: ni un ingreso ni una liquidación las
+  // tienen, así que ni se piden.
+  final tieneLineas = !esIngreso && !tx.esLiquidacion;
   List<TicketLineItem>? items;
-  if (!esIngreso) {
+  if (tieneLineas) {
     final categories = await repository.loadCategories();
     items = await repository.loadTicketItems(tx.id, categories);
   }
   if (!context.mounted) return;
 
-  final titulo = esIngreso
-      ? (tx.categoriaNombre ?? 'Ingreso')
-      : ((tx.comercio?.trim().isNotEmpty ?? false) ? tx.comercio!.trim() : 'Ticket');
+  final titulo = tx.titulo;
 
   await showModalBottomSheet(
     context: context,
@@ -693,18 +769,33 @@ Future<void> _showMovementDetail(BuildContext context, HouseholdRepository repos
             Text(
               [
                 '${tx.fecha.day}/${tx.fecha.month}/${tx.fecha.year}',
-                if (tx.pagadoPor != null) 'Pagado por ${tx.pagadoPor}',
-                if (!tx.compartido) 'Personal (no cuenta en el reparto)',
+                if (tx.esLiquidacion)
+                  tx.esPrestamo
+                      ? '${tx.de} le dio el dinero a ${tx.para}'
+                      : '${tx.de} le devolvió el dinero a ${tx.para}'
+                else ...[
+                  if (tx.pagadoPor != null) 'Pagado por ${tx.pagadoPor}',
+                  if (!tx.compartido) 'Personal (no cuenta en el reparto)',
+                ],
               ].join(' · '),
               style: const TextStyle(color: _mutedInk),
             ),
+            if (tx.esLiquidacion) ...[
+              const SizedBox(height: 8),
+              Text(
+                tx.esPrestamo
+                    ? 'No cuenta como gasto ni como ingreso: solo sube la deuda entre los dos.'
+                    : 'No cuenta como gasto ni como ingreso: solo baja la deuda entre los dos.',
+                style: const TextStyle(color: _mutedInk, fontSize: 12),
+              ),
+            ],
             if (tx.nota != null) ...[
               const SizedBox(height: 8),
               Text(tx.nota!),
             ],
             const SizedBox(height: 16),
             const Divider(),
-            if (!esIngreso)
+            if (tieneLineas)
               if (items == null || items.isEmpty)
                 const Padding(
                   padding: EdgeInsets.symmetric(vertical: 12),
@@ -719,8 +810,8 @@ Future<void> _showMovementDetail(BuildContext context, HouseholdRepository repos
                     subtitle: Text(item.productoNormalizado ?? 'Sin categoría'),
                     trailing: Text(
                       [
-                        if (item.precioTotal != null) '${item.precioTotal!.toStringAsFixed(2)} €',
-                        if (item.pesoGramos != null) '${item.pesoGramos!.toStringAsFixed(0)} g',
+                        if (item.precioTotal != null) euros(item.precioTotal!),
+                        if (item.pesoGramos != null) pesoLegible(item.pesoGramos!),
                       ].join('\n'),
                       textAlign: TextAlign.end,
                     ),
@@ -729,18 +820,68 @@ Future<void> _showMovementDetail(BuildContext context, HouseholdRepository repos
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text('Total', style: TextStyle(fontWeight: FontWeight.bold)),
                 Text(
-                  '${esIngreso ? '+' : ''}${tx.importeTotal.toStringAsFixed(2)} €',
+                  tx.esLiquidacion ? 'Devuelto' : 'Total',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                Text(
+                  '${esIngreso ? '+' : ''}${euros(tx.importeTotal)}',
                   style: TextStyle(fontWeight: FontWeight.bold, color: esIngreso ? _successGreen : null),
                 ),
               ],
             ),
+            if (tx.esLiquidacion) ...[
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: () => _borrarLiquidacion(context, repository, tx),
+                  icon: const Icon(Icons.delete_outline, size: 18),
+                  label: const Text('Borrar movimiento'),
+                ),
+              ),
+            ],
           ],
         ),
       ),
     ),
   );
+}
+
+/// Borra una liquidación apuntada por error.
+///
+/// Es el único sitio desde donde se puede: una liquidación no sale ni en la
+/// lista de gastos ni en la de ingresos, porque no es ni una cosa ni la otra.
+Future<void> _borrarLiquidacion(
+  BuildContext context,
+  HouseholdRepository repository,
+  TransactionSummary tx,
+) async {
+  final confirmado = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Borrar movimiento'),
+      content: Text(
+        tx.esPrestamo
+            ? 'La deuda bajará ${euros(tx.importeTotal)}. No se puede deshacer.'
+            : 'La deuda volverá a subir ${euros(tx.importeTotal)}. No se puede deshacer.',
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancelar')),
+        FilledButton.tonal(onPressed: () => Navigator.of(context).pop(true), child: const Text('Borrar')),
+      ],
+    ),
+  );
+  if (confirmado != true || !context.mounted) return;
+
+  try {
+    await repository.deleteTransaction(tx.id);
+    if (context.mounted) Navigator.of(context).pop(); // cierra el detalle
+  } catch (e) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('No se ha podido borrar: $e')));
+    }
+  }
 }
 
 /// Cabecera común de las hojas de detalle: título, una línea de contexto y el
@@ -762,7 +903,7 @@ class _DetailHeader extends StatelessWidget {
         Text(contexto, style: const TextStyle(color: _mutedInk)),
         const SizedBox(height: 12),
         Text(
-          '${total.toStringAsFixed(2)} €',
+          euros(total),
           style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 8),
@@ -772,8 +913,62 @@ class _DetailHeader extends StatelessWidget {
   }
 }
 
-/// Detalle de un grupo de categoría del mes: todas las líneas de ticket que
-/// han caído en él, para poder ver de dónde sale el importe del gráfico.
+/// Las categorías que no han cabido en la barra, de mayor a menor. Cada una
+/// abre su propio detalle, así que "Resto" deja de ser un callejón sin salida.
+Future<void> _showRestoDetail(
+  BuildContext context,
+  HouseholdRepository repository,
+  String mes,
+  String mesEtiqueta,
+  List<MapEntry<String, double>> plegadas,
+) async {
+  final total = plegadas.fold<double>(0, (sum, e) => sum + e.value);
+
+  await showModalBottomSheet(
+    context: context,
+    isScrollControlled: true,
+    builder: (context) => DraggableScrollableSheet(
+      initialChildSize: 0.5,
+      minChildSize: 0.3,
+      maxChildSize: 0.95,
+      expand: false,
+      builder: (context, scrollController) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: ListView(
+          controller: scrollController,
+          children: [
+            _DetailHeader(
+              titulo: 'Resto de categorías',
+              contexto: '${plegadas.length} categorías en $mesEtiqueta',
+              total: total,
+            ),
+            for (final entrada in plegadas)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                title: Text(entrada.key),
+                subtitle: Text(
+                  total <= 0 ? '' : '${(entrada.value / total * 100).toStringAsFixed(0)}% del resto',
+                  style: const TextStyle(color: _mutedInk),
+                ),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(euros(entrada.value), style: const TextStyle(fontWeight: FontWeight.w600)),
+                    const Icon(Icons.chevron_right, size: 20, color: _mutedInk),
+                  ],
+                ),
+                onTap: () => _showGroupDetail(context, repository, mes, mesEtiqueta, entrada.key),
+              ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+/// Qué se ha comprado de un grupo en el mes, agrupado por producto y de mayor
+/// a menor gasto. Cada producto abre su ficha.
 Future<void> _showGroupDetail(
   BuildContext context,
   HouseholdRepository repository,
@@ -784,6 +979,19 @@ Future<void> _showGroupDetail(
   final lineas = await repository.loadGroupLines(mes, grupo);
   if (!context.mounted) return;
 
+  // Se agrupa por categoría y no por el nombre del producto: dos categorías
+  // pueden llamarse igual, y las líneas de una categoría borrada se quedan sin
+  // ella, así que caen todas juntas en un montón aparte que no se puede abrir.
+  final porProducto = <String?, ({String nombre, double total, int compras})>{};
+  for (final linea in lineas) {
+    final actual = porProducto[linea.categoriaId];
+    porProducto[linea.categoriaId] = (
+      nombre: actual?.nombre ?? linea.producto ?? 'Sin categoría',
+      total: (actual?.total ?? 0) + linea.precio,
+      compras: (actual?.compras ?? 0) + 1,
+    );
+  }
+  final productos = porProducto.entries.toList()..sort((a, b) => b.value.total.compareTo(a.value.total));
   final total = lineas.fold<double>(0, (sum, l) => sum + l.precio);
 
   await showModalBottomSheet(
@@ -801,35 +1009,261 @@ Future<void> _showGroupDetail(
           children: [
             _DetailHeader(
               titulo: grupo,
-              contexto: '${lineas.length} ${lineas.length == 1 ? 'línea' : 'líneas'} en $mesEtiqueta',
+              contexto: [
+                '${productos.length} ${productos.length == 1 ? 'producto' : 'productos'}',
+                '${lineas.length} ${lineas.length == 1 ? 'compra' : 'compras'} en $mesEtiqueta',
+              ].join(' · '),
               total: total,
             ),
-            if (lineas.isEmpty)
+            if (productos.isEmpty)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 12),
                 child: Text('No hay gasto de este grupo en este mes.', style: TextStyle(color: _mutedInk)),
               )
             else
-              for (final linea in lineas)
+              for (final MapEntry(key: categoriaId, value: producto) in productos)
                 ListTile(
                   contentPadding: EdgeInsets.zero,
                   dense: true,
-                  title: Text(linea.textoOriginal.trim().isEmpty ? (linea.producto ?? 'Sin nombre') : linea.textoOriginal),
+                  title: Text(producto.nombre),
                   subtitle: Text(
+                    '${producto.compras} ${producto.compras == 1 ? 'compra' : 'compras'}',
+                    style: const TextStyle(color: _mutedInk),
+                  ),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        euros(producto.total),
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      // Lo que se quedó sin categoría no tiene ficha que abrir.
+                      if (categoriaId != null)
+                        const Icon(Icons.chevron_right, size: 20, color: _mutedInk)
+                      else
+                        const SizedBox(width: 20),
+                    ],
+                  ),
+                  onTap: categoriaId == null
+                      ? null
+                      : () => _showProductDetail(context, repository, mes, categoriaId),
+                ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+/// Cuánto ha subido el precio de lo que se compra, producto a producto.
+Future<void> _showInflationDetail(
+  BuildContext context,
+  HouseholdRepository repository,
+  String mes,
+) async {
+  final datos = await repository.loadBasketInflation(mes);
+  if (!context.mounted) return;
+
+  String tramo(List<String> meses) => meses.isEmpty
+      ? '—'
+      : '${_mesCortoDeClave(meses.first)}–${_mesCortoDeClave(meses.last)}';
+
+  await showModalBottomSheet(
+    context: context,
+    isScrollControlled: true,
+    builder: (context) => DraggableScrollableSheet(
+      initialChildSize: 0.7,
+      minChildSize: 0.3,
+      maxChildSize: 0.95,
+      expand: false,
+      builder: (context, scrollController) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: ListView(
+          controller: scrollController,
+          children: [
+            Text('Precios de tu cesta', style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 4),
+            Text(
+              '${tramo(datos.mesesAhora)} comparado con ${tramo(datos.mesesAntes)}',
+              style: const TextStyle(color: _mutedInk),
+            ),
+            const SizedBox(height: 12),
+            if (!datos.hayDatos)
+              const Text(
+                'Todavía no hay con qué comparar. Hace falta el mismo producto comprado al peso '
+                'en los dos tramos: con unas semanas más de tickets empieza a salir.',
+                style: TextStyle(color: _mutedInk),
+              )
+            else ...[
+              Text(
+                '${datos.variacion! >= 0 ? '+' : ''}${numeroEs(datos.variacion! * 100, decimales: 1)} %',
+                style: TextStyle(
+                  fontSize: 32,
+                  fontWeight: FontWeight.bold,
+                  color: datos.variacion! > 0 ? _statusCritical : _successGreen,
+                ),
+              ),
+              Text(
+                'sobre ${datos.cambios.length} ${datos.cambios.length == 1 ? 'producto' : 'productos'} comparables'
+                '${datos.productosDescartados > 0 ? ' · ${datos.productosDescartados} sin precio en los dos tramos' : ''}',
+                style: const TextStyle(color: _mutedInk, fontSize: 12),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Pesa cada producto por lo que gastas en él ahora: que suba el aceite importa '
+                'más que el perejil.',
+                style: TextStyle(color: _mutedInk, fontSize: 12),
+              ),
+              const SizedBox(height: 16),
+              const Divider(),
+              if (datos.subidas.isNotEmpty) ...[
+                Text('Lo que más ha subido', style: Theme.of(context).textTheme.titleSmall),
+                const SizedBox(height: 4),
+                for (final cambio in datos.subidas) _CambioDePrecio(cambio: cambio),
+                const SizedBox(height: 16),
+              ],
+              if (datos.bajadas.isNotEmpty) ...[
+                Text('Lo que ha bajado', style: Theme.of(context).textTheme.titleSmall),
+                const SizedBox(height: 4),
+                for (final cambio in datos.bajadas) _CambioDePrecio(cambio: cambio),
+              ],
+            ],
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+/// Un producto con su precio antes y ahora.
+class _CambioDePrecio extends StatelessWidget {
+  const _CambioDePrecio({required this.cambio});
+
+  final ProductPriceChange cambio;
+
+  @override
+  Widget build(BuildContext context) {
+    final sube = cambio.variacion > 0;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        children: [
+          Expanded(child: Text(cambio.producto, maxLines: 1, overflow: TextOverflow.ellipsis)),
+          Text(
+            '${numeroEs(cambio.precioAntes)} → ${numeroEs(cambio.precioAhora)} €/kg',
+            style: const TextStyle(color: _mutedInk, fontSize: 12),
+          ),
+          const SizedBox(width: 10),
+          SizedBox(
+            width: 56,
+            child: Text(
+              '${sube ? '+' : ''}${numeroEs(cambio.variacion * 100, decimales: 0)} %',
+              textAlign: TextAlign.end,
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: sube ? _statusCritical : _successGreen,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// La ficha de un producto: lo que cuesta, cómo ha ido en los últimos meses y
+/// en qué compras.
+Future<void> _showProductDetail(
+  BuildContext context,
+  HouseholdRepository repository,
+  String mes,
+  String categoriaId,
+) async {
+  final ficha = await repository.loadProductSummary(categoriaId, mes);
+  if (!context.mounted) return;
+
+  await showModalBottomSheet(
+    context: context,
+    isScrollControlled: true,
+    builder: (context) => DraggableScrollableSheet(
+      initialChildSize: 0.7,
+      minChildSize: 0.3,
+      maxChildSize: 0.95,
+      expand: false,
+      builder: (context, scrollController) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: ListView(
+          controller: scrollController,
+          children: [
+            _DetailHeader(
+              titulo: ficha.producto,
+              contexto: [
+                if (ficha.grupo != null) ficha.grupo!,
+                '${ficha.compras} ${ficha.compras == 1 ? 'compra' : 'compras'} en ${ficha.porMes.length} meses',
+              ].join(' · '),
+              total: ficha.total,
+            ),
+            _FichaDato(etiqueta: 'Este mes', valor: euros(ficha.totalDelMes)),
+            if (ficha.pesoTotalGramos case final peso?)
+              _FichaDato(
+                etiqueta: 'Comprado',
+                valor: pesoLegible(peso),
+              ),
+            if (ficha.precioMedioPorKilo case final medio?)
+              _FichaDato(etiqueta: 'Precio medio', valor: '${numeroEs(medio)} €/kg'),
+            if (ficha.masBarato case final barato?)
+              _FichaDato(
+                etiqueta: 'Más barato',
+                valor: '${numeroEs(barato.precioPorKilo)} €/kg',
+                detalle: [
+                  if (barato.comercio?.trim().isNotEmpty ?? false) barato.comercio!.trim(),
+                  '${barato.fecha.day}/${barato.fecha.month}',
+                ].join(', '),
+              ),
+            if (ficha.sePuedeCompararTiendas) ...[
+              const SizedBox(height: 20),
+              Text('Dónde sale más barato', style: Theme.of(context).textTheme.titleSmall),
+              const SizedBox(height: 4),
+              const Text(
+                'Precio medio por kilo en cada tienda, solo de lo comprado al peso.',
+                style: TextStyle(color: _mutedInk, fontSize: 12),
+              ),
+              const SizedBox(height: 8),
+              _PreciosPorTienda(precios: ficha.porComercio, ahorro: ficha.ahorroPosible),
+            ],
+            const SizedBox(height: 20),
+            Text('Evolución', style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 12),
+            _ProductTrend(porMes: ficha.porMes),
+            const SizedBox(height: 20),
+            const Divider(),
+            if (ficha.lineas.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: Text('No se ha comprado en estos meses.', style: TextStyle(color: _mutedInk)),
+              )
+            else
+              for (final compra in ficha.lineas)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  title: Text(
                     [
-                      if (linea.producto != null) linea.producto!,
-                      '${linea.fecha.day}/${linea.fecha.month}/${linea.fecha.year}',
-                      if (linea.comercio?.trim().isNotEmpty ?? false) linea.comercio!.trim(),
-                      if (linea.pagadoPor != null) linea.pagadoPor!,
-                      if (!linea.compartido) 'Personal',
+                      '${compra.fecha.day}/${compra.fecha.month}/${compra.fecha.year}',
+                      if (compra.comercio?.trim().isNotEmpty ?? false) compra.comercio!.trim(),
                     ].join(' · '),
                   ),
-                  trailing: Text(
+                  subtitle: Text(
                     [
-                      '${linea.precio.toStringAsFixed(2)} €',
-                      if (linea.pesoGramos != null) '${linea.pesoGramos!.toStringAsFixed(0)} g',
-                    ].join('\n'),
-                    textAlign: TextAlign.end,
+                      if (compra.pesoGramos != null) pesoLegible(compra.pesoGramos!),
+                      if (compra.precioPorKilo != null) '${numeroEs(compra.precioPorKilo!)} €/kg',
+                      if (compra.pagadoPor != null) compra.pagadoPor!,
+                      if (!compra.compartido) 'Personal',
+                    ].join(' · '),
+                    style: const TextStyle(color: _mutedInk),
+                  ),
+                  trailing: Text(
+                    euros(compra.precio),
                     style: const TextStyle(fontWeight: FontWeight.w600),
                   ),
                 ),
@@ -839,6 +1273,159 @@ Future<void> _showGroupDetail(
     ),
   );
 }
+
+/// Lo que cuesta un producto en cada tienda, de la más barata a la más cara,
+/// y lo que se habría ahorrado comprando siempre en la primera.
+class _PreciosPorTienda extends StatelessWidget {
+  const _PreciosPorTienda({required this.precios, required this.ahorro});
+
+  final List<StorePrice> precios;
+  final double? ahorro;
+
+  @override
+  Widget build(BuildContext context) {
+    final masCaro = precios.last.precioPorKilo;
+    final masBarato = precios.first.precioPorKilo;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (final precio in precios)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 5),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    precio.comercio,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontWeight: precio.precioPorKilo == masBarato ? FontWeight.bold : null,
+                    ),
+                  ),
+                ),
+                Text(
+                  '${precio.compras} ${precio.compras == 1 ? 'compra' : 'compras'}',
+                  style: const TextStyle(color: _mutedInk, fontSize: 12),
+                ),
+                const SizedBox(width: 10),
+                SizedBox(
+                  width: 78,
+                  child: Text(
+                    '${numeroEs(precio.precioPorKilo)} €/kg',
+                    textAlign: TextAlign.end,
+                    style: TextStyle(
+                      fontWeight: FontWeight.w600,
+                      // Verde la más barata y rojo la más cara solo si de
+                      // verdad se diferencian: con dos tiendas al mismo precio,
+                      // pintar una de cada color sería inventar una diferencia.
+                      color: masCaro == masBarato
+                          ? null
+                          : precio.precioPorKilo == masBarato
+                              ? _successGreen
+                              : precio.precioPorKilo == masCaro
+                                  ? _statusCritical
+                                  : null,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        if (ahorro != null && ahorro! > 0.005) ...[
+          const SizedBox(height: 6),
+          Text(
+            'Comprando siempre en ${precios.first.comercio} te habrías ahorrado ${euros(ahorro!)}.',
+            style: const TextStyle(color: _secondaryInk, fontSize: 12),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+/// Una fila de dato de la ficha: etiqueta a la izquierda, valor a la derecha.
+class _FichaDato extends StatelessWidget {
+  const _FichaDato({required this.etiqueta, required this.valor, this.detalle});
+
+  final String etiqueta;
+  final String valor;
+
+  /// Aclaración que acompaña al valor, más discreta (dónde, cuándo...).
+  final String? detalle;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Expanded(child: Text(etiqueta, style: const TextStyle(color: _secondaryInk))),
+          Text(valor, style: const TextStyle(fontWeight: FontWeight.w600)),
+          if (detalle != null) ...[
+            const SizedBox(width: 6),
+            Text(detalle!, style: const TextStyle(color: _mutedInk, fontSize: 12)),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Lo gastado en un producto mes a mes, en barras.
+///
+/// Las barras van en proporción al mes que más, no a una escala absoluta: lo
+/// que interesa es si sube o baja, no cuánto pesa dentro del gasto total.
+class _ProductTrend extends StatelessWidget {
+  const _ProductTrend({required this.porMes});
+
+  final List<MapEntry<String, double>> porMes;
+
+  static const _alturaMaxima = 56.0;
+
+  @override
+  Widget build(BuildContext context) {
+    final maximo = porMes.fold<double>(0, (mayor, e) => e.value > mayor ? e.value : mayor);
+    if (maximo <= 0) {
+      return const Text('Sin compras en estos meses.', style: TextStyle(color: _mutedInk));
+    }
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        for (final entrada in porMes)
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  entrada.value <= 0 ? '—' : numeroEs(entrada.value, decimales: 0),
+                  style: const TextStyle(color: _secondaryInk, fontSize: 10),
+                ),
+                const SizedBox(height: 4),
+                Container(
+                  // Un suelo de 3 px para que un mes de poco gasto se vea, en
+                  // vez de quedarse en una línea invisible.
+                  height: 3 + _alturaMaxima * entrada.value / maximo,
+                  margin: const EdgeInsets.symmetric(horizontal: 3),
+                  decoration: BoxDecoration(
+                    color: entrada.value <= 0 ? _gridline : _categoricalPalette.first,
+                    borderRadius: const BorderRadius.vertical(top: Radius.circular(3)),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(_mesCortoDeClave(entrada.key), style: const TextStyle(color: _mutedInk, fontSize: 10)),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// "oct" a partir de una clave "AAAA-MM".
+String _mesCortoDeClave(String mes) => _mesesCorto[primerDiaDe(mes).month - 1].toLowerCase();
 
 /// Detalle del gasto de una persona en el mes. Con [soloCompartido] se listan
 /// solo los tickets compartidos que pagó ella (lo que se reparte); sin él, se
@@ -906,13 +1493,13 @@ Future<void> _showPersonDetail(
                   subtitle: Text(
                     [
                       '${tx.fecha.day}/${tx.fecha.month}/${tx.fecha.year}',
-                      if (importeImputado(tx) != tx.importeTotal) 'Ambos · 50% de ${tx.importeTotal.toStringAsFixed(2)} €',
+                      if (importeImputado(tx) != tx.importeTotal) 'Ambos · 50% de ${euros(tx.importeTotal)}',
                       if (!tx.compartido) 'Personal',
                       if (tx.nota != null) tx.nota!,
                     ].join(' · '),
                   ),
                   trailing: Text(
-                    '${importeImputado(tx).toStringAsFixed(2)} €',
+                    euros(importeImputado(tx)),
                     style: const TextStyle(fontWeight: FontWeight.w600),
                   ),
                 ),
