@@ -9,6 +9,7 @@ class DashboardSummary {
     required this.esMesEnCurso,
     required this.gastosPorMes,
     required this.ingresosPorMes,
+    required this.salidasPorMes,
     required this.categoryBreakdown,
     required this.categoryComparison,
     required this.personBreakdown,
@@ -32,6 +33,13 @@ class DashboardSummary {
   /// que se está mirando. La clave de cada entrada es "AAAA-MM".
   final List<MapEntry<String, double>> gastosPorMes;
   final List<MapEntry<String, double>> ingresosPorMes;
+
+  /// Lo que cada mes ha salido a cuentas de fuera (ahorros que no se tocan).
+  ///
+  /// Va aparte del gasto a propósito: resta del disponible porque ya no se
+  /// puede gastar, pero no se ha consumido en nada, así que no tiene categoría
+  /// ni sitio en el desglose.
+  final List<MapEntry<String, double>> salidasPorMes;
 
   /// Gasto del mes por grupo de categoría, de mayor a menor.
   final List<MapEntry<String, double>> categoryBreakdown;
@@ -68,5 +76,12 @@ class DashboardSummary {
   /// acaba justo en él.
   double get gastoDelMes => gastosPorMes.isEmpty ? 0 : gastosPorMes.last.value;
   double get ingresoDelMes => ingresosPorMes.isEmpty ? 0 : ingresosPorMes.last.value;
-  double get balance => ingresoDelMes - gastoDelMes;
+  double get salidaDelMes => salidasPorMes.isEmpty ? 0 : salidasPorMes.last.value;
+
+  /// Lo que queda del ingreso del mes para gastar entre los dos.
+  ///
+  /// Lo que salió a una cuenta de fuera resta igual que el gasto: ya no se
+  /// puede gastar, que es justo lo que mide este número. Lo que se queda en la
+  /// cuenta del día a día no resta, aunque cambie de bolsillo: sigue ahí.
+  double get disponible => ingresoDelMes - gastoDelMes - salidaDelMes;
 }

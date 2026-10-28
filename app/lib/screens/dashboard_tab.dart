@@ -8,6 +8,7 @@ import '../models/ticket_line_item.dart';
 import '../models/transaction_summary.dart';
 import '../services/household_repository.dart';
 import '../utils/formato.dart';
+import '../widgets/month_selector.dart';
 
 /// Paleta categórica de referencia (orden fijo, nunca se reordena ni se
 /// genera un color nuevo para una serie de más: a partir de la 8ª se pliega
@@ -28,18 +29,6 @@ const _statusCritical = Color(0xFFD03B3B);
 const _mutedInk = Color(0xFF898781);
 const _secondaryInk = Color(0xFF52514E);
 const _gridline = Color(0xFFE1E0D9);
-
-const _mesesCorto = [
-  'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic', //
-];
-
-const _mesesLargo = [
-  'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', //
-  'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre', //
-];
-
-/// "Septiembre 2026" a partir del primer día de ese mes.
-String _etiquetaMes(DateTime mes) => '${_mesesLargo[mes.month - 1]} ${mes.year}';
 
 /// Resumen visual: KPIs del mes, gasto por categoría, evolución de los
 /// últimos meses y los movimientos más recientes. Se puede mirar cualquier
@@ -122,23 +111,28 @@ class _DashboardTabState extends State<DashboardTab> {
           }
           final data = snapshot.data!;
           final mes = data.mes;
-          final etiqueta = _etiquetaMes(primerDiaDe(mes));
+          final etiqueta = etiquetaMes(primerDiaDe(mes));
           return ListView(
             padding: const EdgeInsets.all(16),
             children: [
-              _MonthSelector(
+              MonthSelector(
                 etiqueta: etiqueta,
                 onAnterior: () => _cambiarMes(mes, -1),
                 onSiguiente: data.esMesEnCurso ? null : () => _cambiarMes(mes, 1),
                 onHoy: data.esMesEnCurso ? null : _volverAlMesEnCurso,
               ),
-              _TramoDelMes(
+              TramoDelMes(
                 desde: data.desde,
                 hasta: data.ultimoDia,
                 segunNomina: data.inicioSegunNomina,
               ),
               const SizedBox(height: 12),
-              _KpiRow(gasto: data.gastoDelMes, ingreso: data.ingresoDelMes, balance: data.balance),
+              _KpiRow(gasto: data.gastoDelMes, ingreso: data.ingresoDelMes, disponible: data.disponible),
+              // Solo cuando ha salido algo: una fila a cero sería ruido.
+              if (data.salidaDelMes > 0.005) ...[
+                const SizedBox(height: 8),
+                _LineaSalida(importe: data.salidaDelMes),
+              ],
               const SizedBox(height: 28),
               Text('Gasto por categoría', style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 4),
@@ -232,96 +226,42 @@ class _DashboardTabState extends State<DashboardTab> {
   }
 }
 
-/// Qué días entran en el mes que se está mirando.
+/// Lo que este mes ha salido a cuentas de fuera.
 ///
-/// Sale a la vista porque el mes arranca con la nómina y no el día 1, así que
-/// sin decirlo los totales parecerían mal cuadrados. Si de ese mes no hay
-/// nómina guardada se avisa de que el tramo es una estimación.
-class _TramoDelMes extends StatelessWidget {
-  const _TramoDelMes({required this.desde, required this.hasta, required this.segunNomina});
+/// Va en su propia línea y no como un cuarto KPI porque no es lo mismo que
+/// gastar: el dinero sigue siendo vuestro, solo que ya no se puede gastar. Se
+/// dice que está restado, que es la pregunta que surge al verlo.
+class _LineaSalida extends StatelessWidget {
+  const _LineaSalida({required this.importe});
 
-  final DateTime desde;
-
-  /// El último día que entra, ya incluido.
-  final DateTime hasta;
-  final bool segunNomina;
-
-  static String _dia(DateTime fecha) => '${fecha.day} ${_mesesCorto[fecha.month - 1].toLowerCase()}';
-
-  @override
-  Widget build(BuildContext context) {
-    return Text(
-      [
-        'Del ${_dia(desde)} al ${_dia(hasta)}',
-        if (!segunNomina) 'estimado, sin nómina guardada',
-      ].join(' · '),
-      style: const TextStyle(color: _mutedInk, fontSize: 12),
-    );
-  }
-}
-
-/// Cabecera para moverse de mes en mes. La flecha de avanzar se apaga en el
-/// mes en curso, y el propio nombre del mes devuelve a él de un toque.
-class _MonthSelector extends StatelessWidget {
-  const _MonthSelector({
-    required this.etiqueta,
-    required this.onAnterior,
-    this.onSiguiente,
-    this.onHoy,
-  });
-
-  final String etiqueta;
-  final VoidCallback onAnterior;
-
-  /// Nulos cuando ya se está en el mes en curso: ni se puede avanzar al
-  /// futuro, ni tiene sentido ofrecer "volver a hoy".
-  final VoidCallback? onSiguiente;
-  final VoidCallback? onHoy;
+  final double importe;
 
   @override
   Widget build(BuildContext context) {
     return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        IconButton(
-          icon: const Icon(Icons.chevron_left),
-          tooltip: 'Mes anterior',
-          onPressed: onAnterior,
+        const Icon(Icons.savings_outlined, size: 16, color: _mutedInk),
+        const SizedBox(width: 8),
+        const Expanded(
+          child: Text('Salió a cuenta externa', style: TextStyle(color: _secondaryInk, fontSize: 13)),
         ),
-        InkWell(
-          onTap: onHoy,
-          borderRadius: BorderRadius.circular(6),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  etiqueta,
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-                ),
-                if (onHoy != null)
-                  const Text('Volver a este mes', style: TextStyle(color: _mutedInk, fontSize: 11)),
-              ],
-            ),
-          ),
+        Text(
+          euros(importe),
+          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
         ),
-        IconButton(
-          icon: const Icon(Icons.chevron_right),
-          tooltip: 'Mes siguiente',
-          onPressed: onSiguiente,
-        ),
+        const SizedBox(width: 6),
+        const Text('ya restado', style: TextStyle(color: _mutedInk, fontSize: 11)),
       ],
     );
   }
 }
 
 class _KpiRow extends StatelessWidget {
-  const _KpiRow({required this.gasto, required this.ingreso, required this.balance});
+  const _KpiRow({required this.gasto, required this.ingreso, required this.disponible});
 
   final double gasto;
   final double ingreso;
-  final double balance;
+  final double disponible;
 
   @override
   Widget build(BuildContext context) {
@@ -333,9 +273,9 @@ class _KpiRow extends StatelessWidget {
         const SizedBox(width: 10),
         Expanded(
           child: _StatTile(
-            label: 'Balance',
-            value: balance,
-            color: balance >= 0 ? _successGreen : _categoricalPalette[7],
+            label: 'Disponible',
+            value: disponible,
+            color: disponible >= 0 ? _successGreen : _categoricalPalette[7],
             signed: true,
           ),
         ),
@@ -604,7 +544,7 @@ class _MonthlyTrendChart extends StatelessWidget {
                       final mes = int.parse(gastos[i].key.split('-')[1]);
                       return Padding(
                         padding: const EdgeInsets.only(top: 6),
-                        child: Text(_mesesCorto[mes - 1], style: const TextStyle(color: _mutedInk, fontSize: 11)),
+                        child: Text(mesesCorto[mes - 1], style: const TextStyle(color: _mutedInk, fontSize: 11)),
                       );
                     },
                   ),
@@ -723,7 +663,9 @@ class _RecentMovementsState extends State<_RecentMovements> {
                   // del mes, solo cambia el dinero de bolsillo.
                   '${m.esLiquidacion ? '' : (m.tipo == 'ingreso' ? '+' : '-')}${euros(m.importeTotal)}',
                   style: TextStyle(
-                    color: m.esLiquidacion ? _mutedInk : (m.tipo == 'ingreso' ? _successGreen : null),
+                    color: m.esLiquidacion
+                        ? _mutedInk
+                        : (m.tipo == 'ingreso' ? _successGreen : null),
                     fontWeight: FontWeight.bold,
                   ),
                 ),
@@ -780,7 +722,14 @@ Future<void> _showMovementDetail(BuildContext context, HouseholdRepository repos
               ].join(' · '),
               style: const TextStyle(color: _mutedInk),
             ),
-            if (tx.esLiquidacion) ...[
+            if (tx.saleDelDisponible) ...[
+              const SizedBox(height: 8),
+              const Text(
+                'Fue a una cuenta de fuera: mueve la deuda y además resta del disponible '
+                'del mes, porque ese dinero ya no se puede gastar.',
+                style: TextStyle(color: _mutedInk, fontSize: 12),
+              ),
+            ] else if (tx.esLiquidacion) ...[
               const SizedBox(height: 8),
               Text(
                 tx.esPrestamo
@@ -848,10 +797,8 @@ Future<void> _showMovementDetail(BuildContext context, HouseholdRepository repos
   );
 }
 
-/// Borra una liquidación apuntada por error.
-///
-/// Es el único sitio desde donde se puede: una liquidación no sale ni en la
-/// lista de gastos ni en la de ingresos, porque no es ni una cosa ni la otra.
+/// Borra una liquidación apuntada por error, sin tener que ir a buscarla a la
+/// lista de pases de dinero.
 Future<void> _borrarLiquidacion(
   BuildContext context,
   HouseholdRepository repository,
@@ -1182,6 +1129,12 @@ Future<void> _showProductDetail(
   final ficha = await repository.loadProductSummary(categoriaId, mes);
   if (!context.mounted) return;
 
+  // Se abre desde un mes, así que lo de arriba y la lista son de ese mes. Lo
+  // demás (precios, tiendas, evolución) mira la ventana entera: con las
+  // compras de un solo mes no hay con qué comparar.
+  final mesEtiqueta = etiquetaMes(primerDiaDe(mes));
+  final delMes = ficha.lineasDelMes;
+
   await showModalBottomSheet(
     context: context,
     isScrollControlled: true,
@@ -1199,11 +1152,17 @@ Future<void> _showProductDetail(
               titulo: ficha.producto,
               contexto: [
                 if (ficha.grupo != null) ficha.grupo!,
-                '${ficha.compras} ${ficha.compras == 1 ? 'compra' : 'compras'} en ${ficha.porMes.length} meses',
+                '${delMes.length} ${delMes.length == 1 ? 'compra' : 'compras'} en $mesEtiqueta',
               ].join(' · '),
-              total: ficha.total,
+              total: ficha.totalDelMes,
             ),
-            _FichaDato(etiqueta: 'Este mes', valor: euros(ficha.totalDelMes)),
+            Text('Últimos ${ficha.porMes.length} meses', style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 4),
+            _FichaDato(
+              etiqueta: 'Gastado',
+              valor: euros(ficha.total),
+              detalle: '${ficha.compras} ${ficha.compras == 1 ? 'compra' : 'compras'}',
+            ),
             if (ficha.pesoTotalGramos case final peso?)
               _FichaDato(
                 etiqueta: 'Comprado',
@@ -1237,13 +1196,14 @@ Future<void> _showProductDetail(
             _ProductTrend(porMes: ficha.porMes),
             const SizedBox(height: 20),
             const Divider(),
-            if (ficha.lineas.isEmpty)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 12),
-                child: Text('No se ha comprado en estos meses.', style: TextStyle(color: _mutedInk)),
+            Text('Compras en $mesEtiqueta', style: Theme.of(context).textTheme.titleSmall),
+            if (delMes.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Text('No se ha comprado en $mesEtiqueta.', style: const TextStyle(color: _mutedInk)),
               )
             else
-              for (final compra in ficha.lineas)
+              for (final compra in delMes)
                 ListTile(
                   contentPadding: EdgeInsets.zero,
                   dense: true,
@@ -1425,7 +1385,7 @@ class _ProductTrend extends StatelessWidget {
 }
 
 /// "oct" a partir de una clave "AAAA-MM".
-String _mesCortoDeClave(String mes) => _mesesCorto[primerDiaDe(mes).month - 1].toLowerCase();
+String _mesCortoDeClave(String mes) => mesesCorto[primerDiaDe(mes).month - 1].toLowerCase();
 
 /// Detalle del gasto de una persona en el mes. Con [soloCompartido] se listan
 /// solo los tickets compartidos que pagó ella (lo que se reparte); sin él, se

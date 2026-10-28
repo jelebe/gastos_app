@@ -7,15 +7,17 @@ import '../models/ticket_line_item.dart';
 import '../models/transaction_summary.dart';
 import '../services/household_repository.dart';
 import '../utils/formato.dart';
+import '../utils/text_normalizer.dart';
 import '../widgets/add_income_sheet.dart';
 import '../widgets/category_picker_sheet.dart';
 import '../widgets/money_transfer_sheet.dart';
+import '../widgets/month_selector.dart';
 import '../widgets/update_dialog.dart';
 import 'capture_screen.dart';
 import 'confirm_ticket_screen.dart';
 import 'dashboard_tab.dart';
 
-enum _Section { inicio, ingresos, gastos, categorias, tiendas }
+enum _Section { inicio, ingresos, gastos, pases, categorias, tiendas }
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -46,6 +48,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _Section.inicio: 'Inicio',
     _Section.ingresos: 'Ingresos',
     _Section.gastos: 'Gastos',
+    _Section.pases: 'Pases de dinero',
     _Section.categorias: 'Categorías',
     _Section.tiendas: 'Tiendas',
   };
@@ -118,6 +121,11 @@ class _HomeScreenState extends State<HomeScreen> {
     final categories = await _repository.loadCategories();
     if (!context.mounted) return;
     await showAddIncomeSheet(context, repository: _repository, categories: categories);
+    _refreshDashboard();
+  }
+
+  Future<void> _addTransfer(BuildContext context) async {
+    await showMoneyTransferSheet(context, repository: _repository);
     _refreshDashboard();
   }
 
@@ -259,6 +267,12 @@ class _HomeScreenState extends State<HomeScreen> {
                 onTap: () => _selectSection(_Section.gastos),
               ),
               _DrawerItem(
+                icon: Icons.swap_horiz,
+                label: 'Pases de dinero',
+                selected: _section == _Section.pases,
+                onTap: () => _selectSection(_Section.pases),
+              ),
+              _DrawerItem(
                 icon: Icons.category_outlined,
                 label: 'Categorías',
                 selected: _section == _Section.categorias,
@@ -290,6 +304,12 @@ class _HomeScreenState extends State<HomeScreen> {
             onDelete: _confirmDeleteTransaction,
             onEdit: _editTransaction,
           ),
+          _TransactionsList(
+            repository: _repository,
+            tipo: 'liquidacion',
+            onDelete: _confirmDeleteTransaction,
+            onEdit: _editTransaction,
+          ),
           _CategoriesTab(repository: _repository, onDeleteCategory: _confirmDeleteCategory),
           _StoresTab(repository: _repository, key: _storesKey),
         ],
@@ -297,6 +317,7 @@ class _HomeScreenState extends State<HomeScreen> {
       floatingActionButton: FloatingActionButton(
         onPressed: () => switch (_section) {
           _Section.ingresos => _addIncome(context),
+          _Section.pases => _addTransfer(context),
           _Section.categorias => _addCategory(context),
           _Section.tiendas => _storesKey.currentState?.nuevaTienda() ?? Future.value(),
           _Section.inicio || _Section.gastos => _showAddOptions(context),
@@ -767,16 +788,53 @@ class _TransactionsList extends StatefulWidget {
 
 class _TransactionsListState extends State<_TransactionsList> {
   // Igual que en _CategoriesTab: el stream se crea una sola vez, no en cada
-  // build(), para no resuscribirse (y parpadear) sin necesidad.
-  late final Stream<List<TransactionSummary>> _stream = widget.repository.watchTransactions(widget.tipo);
+  // build(), para no resuscribirse (y parpadear) sin necesidad. Cambiar de
+  // mes solo cambia qué se filtra de lo que ya llega.
+  late final _stream = widget.repository.watchTransactions(widget.tipo);
 
   /// Persona por la que se está filtrando; `null` es "todas".
   String? _persona;
 
+  /// El mes contable que se está mirando, o nulo para el que corre ahora.
+  /// Los pases de dinero no van por meses: una deuda no caduca con el mes.
+  String? _mes;
+
+  bool get _porMes => widget.tipo != 'liquidacion';
+
+  final _searchController = TextEditingController();
+
+  /// Lo escrito en el buscador. Mientras hay algo, se busca en todos los
+  /// meses: lo normal es querer encontrar "cuándo pagué esto", y eso rara vez
+  /// cae en el mes que se está mirando.
+  String _query = '';
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  /// Si [tx] encaja con [consulta], ya normalizada: por tienda, categoría,
+  /// nota o quién pagó, sin distinguir tildes ni mayúsculas, o por importe
+  /// ("12,5" encuentra 12,50 €).
+  static bool _coincide(TransactionSummary tx, String consulta) {
+    final textos = [tx.titulo, tx.comercio, tx.categoriaNombre, tx.nota, tx.pagadoPor, tx.de, tx.para];
+    if (textos.any((t) => t != null && normalizeLine(t).contains(consulta))) return true;
+    final importe = tx.importeTotal.toStringAsFixed(2);
+    final consultaNumero = consulta.replaceAll(',', '.');
+    return importe.contains(consultaNumero) || importe.replaceAll('.', ',').contains(consulta);
+  }
+
+  void _cambiarMes(String mesActual, int deltaMeses) {
+    final primero = primerDiaDe(mesActual);
+    setState(() => _mes = mesDe(DateTime(primero.year, primero.month + deltaMeses)));
+  }
+
   @override
   Widget build(BuildContext context) {
     final esIngreso = widget.tipo == 'ingreso';
-    return StreamBuilder<List<TransactionSummary>>(
+    final esPase = widget.tipo == 'liquidacion';
+    return StreamBuilder(
       stream: _stream,
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
@@ -786,15 +844,17 @@ class _TransactionsListState extends State<_TransactionsList> {
           return Center(child: Text('Error: ${snapshot.error}'));
         }
 
-        final transactions = snapshot.data!;
-        if (transactions.isEmpty) {
+        final (:movimientos, :meses) = snapshot.data!;
+        if (movimientos.isEmpty) {
           return Center(
             child: Padding(
               padding: const EdgeInsets.all(24),
               child: Text(
-                esIngreso
-                    ? 'Todavía no has registrado ningún ingreso.\nPulsa el botón + para añadir uno.'
-                    : 'Todavía no has registrado ningún gasto.\nPulsa el botón + para escanear un ticket o añadirlo a mano.',
+                switch (widget.tipo) {
+                  'ingreso' => 'Todavía no has registrado ningún ingreso.\nPulsa el botón + para añadir uno.',
+                  'liquidacion' => 'Todavía no os habéis pasado dinero.\nPulsa el botón + para apuntarlo.',
+                  _ => 'Todavía no has registrado ningún gasto.\nPulsa el botón + para escanear un ticket o añadirlo a mano.',
+                },
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.grey),
               ),
@@ -802,23 +862,72 @@ class _TransactionsListState extends State<_TransactionsList> {
           );
         }
 
+        // El mes no es el del calendario: lo que se gasta desde que entra la
+        // nómina ya es del mes siguiente, igual que en el resumen.
+        final mesAhora = meses.mesContableDe(DateTime.now());
+        final mes = _mes ?? mesAhora;
+        final consulta = normalizeLine(_query);
+        final buscando = consulta.isNotEmpty;
+        final porMes = _porMes && !buscando;
+        final delMes = porMes
+            ? movimientos.where((tx) => meses.mesContableDe(tx.fecha) == mes).toList()
+            : movimientos;
+        final encontrados = buscando ? delMes.where((tx) => _coincide(tx, consulta)).toList() : delMes;
+
         // "Ambos" es un valor de pagadoPor como otro cualquiera, así que va
         // como una opción más del filtro: filtrar por "Cano" enseña lo que
-        // pagó él, no lo que pagaron entre los dos.
-        final visibles = _persona == null
-            ? transactions
-            : transactions.where((tx) => tx.pagadoPor == _persona).toList();
-        // Una liquidación se lista, pero no suma: lo que la casa gastó ya se
-        // contó al registrar el ticket, y devolver el dinero no es un gasto
-        // nuevo. Se cuenta aparte para que el total cuadre a la vista.
-        final liquidaciones = visibles.where((tx) => tx.esLiquidacion).length;
-        final cuantos = visibles.length - liquidaciones;
-        final total = visibles
-            .where((tx) => !tx.esLiquidacion)
-            .fold<double>(0, (sum, tx) => sum + tx.importeTotal);
+        // pagó él, no lo que pagaron entre los dos. En un pase, pagadoPor es
+        // quien puso el dinero.
+        final visibles =
+            _persona == null ? encontrados : encontrados.where((tx) => tx.pagadoPor == _persona).toList();
+        final total = visibles.fold<double>(0, (sum, tx) => sum + tx.importeTotal);
+        final tramo = meses.tramoDe(mes);
 
         return Column(
           children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              child: TextField(
+                controller: _searchController,
+                decoration: InputDecoration(
+                  labelText: switch (widget.tipo) {
+                    'ingreso' => 'Buscar ingreso',
+                    'liquidacion' => 'Buscar pase de dinero',
+                    _ => 'Buscar gasto',
+                  },
+                  hintText: 'Tienda, nota, importe...',
+                  prefixIcon: const Icon(Icons.search),
+                  suffixIcon: buscando
+                      ? IconButton(
+                          icon: const Icon(Icons.clear),
+                          tooltip: 'Borrar búsqueda',
+                          onPressed: () {
+                            _searchController.clear();
+                            setState(() => _query = '');
+                          },
+                        )
+                      : null,
+                  isDense: true,
+                ),
+                onChanged: (value) => setState(() => _query = value),
+              ),
+            ),
+            if (porMes) ...[
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: MonthSelector(
+                  etiqueta: etiquetaMes(primerDiaDe(mes)),
+                  onAnterior: () => _cambiarMes(mes, -1),
+                  onSiguiente: mes == mesAhora ? null : () => _cambiarMes(mes, 1),
+                  onHoy: mes == mesAhora ? null : () => setState(() => _mes = null),
+                ),
+              ),
+              TramoDelMes(
+                desde: tramo.desde,
+                hasta: tramo.hasta.subtract(const Duration(days: 1)),
+                segunNomina: meses.segunNomina(mes),
+              ),
+            ],
             _PersonFilter(
               selected: _persona,
               onChanged: (persona) => setState(() => _persona = persona),
@@ -830,19 +939,22 @@ class _TransactionsListState extends State<_TransactionsList> {
                 children: [
                   Text(
                     [
-                      '$cuantos ${_etiquetaCantidad(cuantos, esIngreso)}',
-                      if (liquidaciones > 0)
-                        '$liquidaciones ${liquidaciones == 1 ? 'liquidación' : 'liquidaciones'}',
-                    ].join(' · '),
+                      '${visibles.length} ${_etiquetaCantidad(visibles.length)}',
+                      if (buscando && _porMes) 'en todos los meses',
+                    ].join(' '),
                     style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.grey),
                   ),
-                  Text(
-                    '${esIngreso ? '+' : '-'}${euros(total)}',
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                          fontWeight: FontWeight.bold,
-                          color: esIngreso ? Colors.green : null,
-                        ),
-                  ),
+                  // Sumar pases que van en los dos sentidos no da nada que
+                  // leer: lo que importa de ellos es el saldo, y está en el
+                  // detalle de cada uno.
+                  if (!esPase)
+                    Text(
+                      '${esIngreso ? '+' : '-'}${euros(total)}',
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.bold,
+                            color: esIngreso ? Colors.green : null,
+                          ),
+                    ),
                 ],
               ),
             ),
@@ -852,9 +964,7 @@ class _TransactionsListState extends State<_TransactionsList> {
                   child: Padding(
                     padding: const EdgeInsets.all(24),
                     child: Text(
-                      esIngreso
-                          ? 'No hay ingresos de $_persona.'
-                          : 'No hay gastos pagados por $_persona.',
+                      _sinResultados(),
                       textAlign: TextAlign.center,
                       style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.grey),
                     ),
@@ -869,9 +979,22 @@ class _TransactionsListState extends State<_TransactionsList> {
     );
   }
 
-  String _etiquetaCantidad(int cuantos, bool esIngreso) {
-    if (esIngreso) return cuantos == 1 ? 'ingreso' : 'ingresos';
-    return cuantos == 1 ? 'gasto' : 'gastos';
+  String _etiquetaCantidad(int cuantos) => switch (widget.tipo) {
+        'ingreso' => cuantos == 1 ? 'ingreso' : 'ingresos',
+        'liquidacion' => cuantos == 1 ? 'pase de dinero' : 'pases de dinero',
+        _ => cuantos == 1 ? 'gasto' : 'gastos',
+      };
+
+  String _sinResultados() {
+    if (_query.trim().isNotEmpty) return 'Nada coincide con "${_query.trim()}".';
+    final enElMes = _porMes ? ' este mes' : '';
+    return switch ((widget.tipo, _persona)) {
+      ('ingreso', null) => 'No hay ingresos$enElMes.',
+      ('ingreso', final persona) => 'No hay ingresos de $persona$enElMes.',
+      ('liquidacion', final persona) => 'No hay pases de dinero de $persona.',
+      (_, null) => 'No hay gastos$enElMes.',
+      (_, final persona) => 'No hay gastos pagados por $persona$enElMes.',
+    };
   }
 
   Widget _buildList(List<TransactionSummary> transactions, bool esIngreso) {

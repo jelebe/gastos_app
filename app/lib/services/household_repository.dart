@@ -283,14 +283,19 @@ class HouseholdRepository {
 
     final household = await householdRef;
     final snap = await household.collection('transactions').where('tipo', isEqualTo: 'ingreso').get();
+    return _meses = _mesesDe(snap.docs);
+  }
+
+  /// El reparto de meses que dejan las nóminas que haya entre [docs].
+  static MesesContables _mesesDe(Iterable<QueryDocumentSnapshot<Map<String, dynamic>>> docs) {
     final nominas = <DateTime>[];
-    for (final doc in snap.docs) {
+    for (final doc in docs) {
       final data = doc.data();
-      if (!esNominaCategoria(data['categoriaNombre'] as String?)) continue;
+      if (data['tipo'] != 'ingreso' || !esNominaCategoria(data['categoriaNombre'] as String?)) continue;
       final fecha = (data['fecha'] as Timestamp?)?.toDate();
       if (fecha != null) nominas.add(fecha);
     }
-    return _meses = MesesContables.deNominas(nominas);
+    return MesesContables.deNominas(nominas);
   }
 
   Future<CollectionReference<Map<String, dynamic>>> get _categoriesCol async =>
@@ -789,6 +794,8 @@ class HouseholdRepository {
     for (final doc in snap.docs) {
       final data = doc.data();
       movimientos.add((
+        // Que el dinero acabe fuera no cambia el saldo entre los dos: para la
+        // deuda lo que cuenta es quién lo puso.
         tipo: data['tipo'] as String? ?? '',
         // Una liquidación guarda de quién sale el dinero en `de`; un gasto,
         // en `pagadoPor`.
@@ -818,6 +825,7 @@ class HouseholdRepository {
     required double importe,
     required DateTime fecha,
     String concepto = conceptoSaldar,
+    bool aCuentaExterna = false,
     String? nota,
   }) async {
     final uid = FirebaseAuth.instance.currentUser!.uid;
@@ -835,27 +843,30 @@ class HouseholdRepository {
       // filtros por persona que ya existen.
       'pagadoPor': de,
       'importeTotal': importe,
+      'aCuentaExterna': aCuentaExterna,
       'nota': (nota == null || nota.trim().isEmpty) ? null : nota.trim(),
       'moneda': 'EUR',
       'creadoPor': uid,
     });
   }
 
-  /// Gastos o ingresos ya guardados (según [tipo]), del más reciente al más
-  /// antiguo. Se ordena en el cliente para no depender de un índice
-  /// compuesto en Firestore.
+  /// Los movimientos ya guardados de [tipo] ('gasto', 'ingreso' o
+  /// 'liquidacion'), del más reciente al más antiguo, junto con cómo se
+  /// reparten los meses para poder listarlos mes a mes.
   ///
-  /// Con los gastos van también las liquidaciones: es dinero que sale del
-  /// bolsillo de uno, y si no se listaran aquí no habría dónde verlas ni
-  /// cómo borrar una apuntada por error. Eso sí, no suman en el total: lo
-  /// que la casa gastó ya se contó cuando se registró el ticket.
-  Stream<List<TransactionSummary>> watchTransactions(String tipo) {
-    final tipos = tipo == 'gasto' ? const ['gasto', 'liquidacion'] : [tipo];
+  /// Se escucha la colección entera y se filtra aquí, no en la consulta: las
+  /// nóminas que deciden dónde empieza cada mes van entre los ingresos, y la
+  /// lista de gastos tiene que enterarse cuando entra una. Se ordena en el
+  /// cliente para no depender de un índice compuesto en Firestore.
+  Stream<({List<TransactionSummary> movimientos, MesesContables meses})> watchTransactions(String tipo) {
     return Stream.fromFuture(householdRef).asyncExpand(
-      (ref) => ref.collection('transactions').where('tipo', whereIn: tipos).snapshots().map((snap) {
-        final list = snap.docs.map((d) => TransactionSummary.fromFirestore(d.id, d.data())).toList();
-        list.sort((a, b) => b.fecha.compareTo(a.fecha));
-        return list;
+      (ref) => ref.collection('transactions').snapshots().map((snap) {
+        final meses = _meses = _mesesDe(snap.docs);
+        final list = [
+          for (final d in snap.docs)
+            if (d.data()['tipo'] == tipo) TransactionSummary.fromFirestore(d.id, d.data()),
+        ]..sort((a, b) => b.fecha.compareTo(a.fecha));
+        return (movimientos: list, meses: meses);
       }),
     );
   }
@@ -955,6 +966,7 @@ class HouseholdRepository {
 
     final gastosPorMes = {for (final m in meses) m: 0.0};
     final ingresosPorMes = {for (final m in meses) m: 0.0};
+    final salidasPorMes = {for (final m in meses) m: 0.0};
     final porPersona = <String, double>{};
     final totalPorPersona = {'Cano': 0.0, 'Cana': 0.0};
 
@@ -963,8 +975,18 @@ class HouseholdRepository {
       final mesDoc = mesContableDelDoc(data);
       final importe = (data['importeTotal'] as num).toDouble();
       final tipo = data['tipo'];
-      // Una liquidación solo mueve dinero de un bolsillo al otro: ni se ha
-      // gastado ni se ha ingresado nada, así que no entra en ningún total.
+      // Saldar una deuda pagando a una cuenta de fuera resta del disponible
+      // pero no es gasto: no se ha consumido en nada, así que va aparte y no
+      // entra en el desglose por categoría. Si se paga a la cuenta del día a
+      // día no resta, porque ese dinero sigue ahí para gastarlo los dos.
+      if (tipo == 'liquidacion' && data['aCuentaExterna'] == true) {
+        if (salidasPorMes.containsKey(mesDoc)) {
+          salidasPorMes[mesDoc] = salidasPorMes[mesDoc]! + importe;
+        }
+        continue;
+      }
+      // Una liquidación que se queda en la cuenta del día a día solo mueve
+      // dinero de un bolsillo al otro: sigue disponible para los dos.
       if (tipo != 'gasto' && tipo != 'ingreso') continue;
       final esGasto = tipo == 'gasto';
 
@@ -1016,6 +1038,7 @@ class HouseholdRepository {
       esMesEnCurso: mes == mesAhora,
       gastosPorMes: [for (final m in meses) MapEntry(m, gastosPorMes[m]!)],
       ingresosPorMes: [for (final m in meses) MapEntry(m, ingresosPorMes[m]!)],
+      salidasPorMes: [for (final m in meses) MapEntry(m, salidasPorMes[m]!)],
       categoryBreakdown: _ordenadoPorImporte(gastoPorGrupo),
       categoryComparison: comparacion,
       personBreakdown: _ordenadoPorImporte(porPersona),

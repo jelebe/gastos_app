@@ -24,6 +24,7 @@ class TransactionSummary {
     this.de,
     this.para,
     this.concepto,
+    this.aCuentaExterna = false,
   });
 
   factory TransactionSummary.fromFirestore(String id, Map<String, dynamic> data) {
@@ -43,6 +44,7 @@ class TransactionSummary {
       de: data['de'] as String?,
       para: data['para'] as String?,
       concepto: data['concepto'] as String?,
+      aCuentaExterna: data['aCuentaExterna'] == true,
     );
   }
 
@@ -71,13 +73,31 @@ class TransactionSummary {
   /// mismo por dentro (mueve el saldo igual), pero se lee al revés.
   bool get esPrestamo => concepto == conceptoPrestamo;
 
+  /// El dinero de este movimiento fue a una cuenta de fuera del circuito de
+  /// ingresos y gastos de la casa (un ahorro que no se toca), en vez de a la
+  /// cuenta del día a día.
+  ///
+  /// Va como marca de un movimiento entre los dos y no como un tipo aparte
+  /// porque es una sola transferencia haciendo dos cosas: mover la deuda y
+  /// sacar el dinero del disponible. Separarlo en dos apuntes invitaría a
+  /// contarlo dos veces.
+  final bool aCuentaExterna;
+
+  /// El dinero ha salido del disponible: ni se ha gastado en nada ni deja de
+  /// ser vuestro, pero ya no está para gastarlo este mes. Resta del disponible
+  /// y no entra en el gasto por categoría.
+  bool get saleDelDisponible => esLiquidacion && aCuentaExterna;
+
   /// Una devolución de dinero entre los dos: ni gasto ni ingreso de la casa,
   /// solo cambia de bolsillo. No suma en ningún total del resumen.
   bool get esLiquidacion => tipo == 'liquidacion';
 
   /// Con qué nombre se lista este movimiento.
   String get titulo {
-    if (esLiquidacion) return esPrestamo ? 'Dinero prestado' : 'Saldar deuda';
+    if (esLiquidacion) {
+      final base = esPrestamo ? 'Dinero prestado' : 'Saldar deuda';
+      return aCuentaExterna ? '$base (a cuenta externa)' : base;
+    }
     if (tipo == 'ingreso') return categoriaNombre ?? 'Ingreso';
     return (comercio?.trim().isNotEmpty ?? false) ? comercio!.trim() : 'Ticket';
   }

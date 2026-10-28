@@ -59,6 +59,14 @@ class _SettleDebtSheetState extends State<_SettleDebtSheet> {
 
   String get _para => _de == personaA ? personaB : personaA;
 
+  /// A qué cuenta va el dinero. Si acaba en una de fuera (un ahorro que no se
+  /// toca), sale del disponible del mes; si va a la del día a día, sigue ahí
+  /// para gastarlo los dos y el disponible no se mueve.
+  ///
+  /// La deuda cambia igual en los dos casos: lo que cuenta para el saldo es
+  /// quién puso el dinero, no dónde acabó.
+  bool _aCuentaExterna = false;
+
   /// Si este dinero baja una deuda que ya había, o si la crea porque lo pone
   /// quien no debía nada. No cambia las cuentas, solo cómo se lee luego.
   bool get _esSaldar => !widget.saldo.saldado && _de == widget.saldo.deudor;
@@ -117,6 +125,7 @@ class _SettleDebtSheetState extends State<_SettleDebtSheet> {
         importe: importe,
         fecha: _fecha,
         concepto: _esSaldar ? conceptoSaldar : conceptoPrestamo,
+        aCuentaExterna: _aCuentaExterna,
         nota: _notaController.text,
       );
       if (mounted) Navigator.of(context).pop(true);
@@ -165,6 +174,26 @@ class _SettleDebtSheetState extends State<_SettleDebtSheet> {
                 helperText: _esSaldar ? '$_de le devuelve el dinero a $_para' : '$_de le pasa el dinero a $_para',
               ),
               keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            ),
+            const SizedBox(height: 16),
+            Text('¿A qué cuenta va?', style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 8),
+            SegmentedButton<bool>(
+              segments: const [
+                ButtonSegment(value: false, label: Text('De diario')),
+                ButtonSegment(value: true, label: Text('Externa')),
+              ],
+              selected: {_aCuentaExterna},
+              onSelectionChanged: (v) => setState(() => _aCuentaExterna = v.first),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              _aCuentaExterna
+                  ? 'A una cuenta de fuera (un ahorro que no se toca): ese dinero ya no se '
+                      'puede gastar, así que resta del disponible del mes.'
+                  : 'A la cuenta del día a día: sigue disponible para gastarlo los dos, así '
+                      'que el disponible del mes no cambia.',
+              style: const TextStyle(color: Colors.grey, fontSize: 12),
             ),
             const SizedBox(height: 12),
             InkWell(

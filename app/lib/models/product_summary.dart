@@ -76,6 +76,11 @@ class ProductSummary {
   /// Lo gastado en el mes que se está mirando, que es el último de la ventana.
   double get totalDelMes => porMes.isEmpty ? 0 : porMes.last.value;
 
+  /// Las compras del mes que se está mirando, de la más reciente a la más
+  /// antigua. Las del resto de la ventana solo sirven para el histórico.
+  List<ProductPurchase> get lineasDelMes =>
+      porMes.isEmpty ? const [] : [for (final l in lineas) if (l.mesContable == porMes.last.key) l];
+
   /// Si hay algo que contar del precio por kilo.
   bool get tienePrecioPorKilo => precioMedioPorKilo != null;
 }

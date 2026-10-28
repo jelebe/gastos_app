@@ -57,6 +57,14 @@ void main() {
       expect(ficha.totalDelMes, 2.15);
     });
 
+    test('la lista del mes solo trae las compras del mes que se mira', () {
+      // Lo que motivó separarla: al abrir la ficha desde octubre salían
+      // también las compras de septiembre.
+      final ficha = resumen([compra('2026-09', 10, 1.00), compra('2026-10', 4, 2.15), compra('2026-10', 12, 1.80)]);
+      expect(ficha.lineasDelMes.map((l) => l.precio), [1.80, 2.15]);
+      expect(ficha.lineas, hasLength(3));
+    });
+
     test('una compra fuera de la ventana suma al total pero no a ningún mes', () {
       // Puede pasar con un ticket de fecha rara: mejor que salga en el total
       // y en la lista que no salga en ninguna parte.
