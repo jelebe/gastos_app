@@ -22,6 +22,7 @@ class ConfirmTicketScreen extends StatefulWidget {
     this.compartidoInicial = true,
     this.descartadas = const [],
     this.esEscaneo = false,
+    this.huellasTienda = const [],
   });
 
   final HouseholdRepository repository;
@@ -44,6 +45,11 @@ class ConfirmTicketScreen extends StatefulWidget {
   /// Viene de escanear un ticket: al guardar, además de las categorías, se
   /// aprende qué líneas no eran productos (las borradas y las no recuperadas).
   final bool esEscaneo;
+
+  /// Lo que identifica la tienda en el ticket escaneado (CIF, cabecera...):
+  /// al guardar se apunta con la tienda elegida, para ponerla sola la próxima
+  /// vez.
+  final List<String> huellasTienda;
 
   bool get isEditing => transactionId != null;
 
@@ -172,7 +178,15 @@ class _ConfirmTicketScreenState extends State<ConfirmTicketScreen> {
       ];
       await widget.repository.learnLines(_lineasParaAprender());
 
-      final comercio = (_comercio?.trim().isEmpty ?? true) ? null : _comercio!.trim();
+      var comercio = (_comercio?.trim().isEmpty ?? true) ? null : _comercio!.trim();
+      // La tienda reconocida puede ser una cadena que aún no estaba en la
+      // lista: se añade, y si ya estaba se usa el nombre tal cual está ahí.
+      if (comercio != null && widget.esEscaneo) {
+        comercio = (await widget.repository.createStore(comercio)).nombre;
+      }
+      if (comercio != null && widget.huellasTienda.isNotEmpty) {
+        await widget.repository.learnStoreFingerprints(widget.huellasTienda, comercio);
+      }
       final comentario = _comentarioController.text.trim().isEmpty ? null : _comentarioController.text.trim();
       if (widget.isEditing) {
         await widget.repository.updateTicket(

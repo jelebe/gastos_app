@@ -290,6 +290,57 @@ Desglose de IVA... Base Imp. Total IVA
       expect(total, closeTo(21.00, 0.001));
     });
 
+    test('ticket real de Eroski City: la cabecera antes de "EUROS/TOT" no son productos', () {
+      // El nombre de la tienda, el barrio y la línea de caja y fecha no llevan
+      // precio ni nada que los delate como ruido; lo que los descarta es que
+      // vienen antes de la cabecera de la tabla.
+      final result = parseReceiptLines('''
+EROSKI CITY
+PEÑAGRANDE
+-----------FACTURA SIMPLIFICADA-----------
+184900012611094244
+URI BROS S.L.
+TELEFONO: 944441416 CIF:   B-42825323
+C:8490 09-11-2026 13:28   019 01   1 4244
+8490 1432 01 1794227334
+EUROS/TOT   ING.CLUB
+GNOCHI EROSKI   1,09
+HUMMUS CLASIC.240   1,70
+TORT. POLLO PANCE   1,99
+HAMBURGUESA PAVO   3,69
+EROSKI TOMATE TRI   0,56
+STDO PICOS-REGANA   1,04
+BEBIDA AVENA YOSO   1,75
+Q.4QUESOS EROSKI   1,89
+TOTAL A PAGAR   13,71
+S.:01   SC:897382   A.: 741319
+IVA incluido
+10,0% IVA DE   9,80   0,98
+4,0% IVA DE   2,82   0,11
+''');
+      expect(result.map((r) => r.descripcion), [
+        'GNOCHI EROSKI',
+        'HUMMUS CLASIC.240',
+        'TORT. POLLO PANCE',
+        'HAMBURGUESA PAVO',
+        'EROSKI TOMATE TRI',
+        'STDO PICOS-REGANA',
+        'BEBIDA AVENA YOSO',
+        'Q.4QUESOS EROSKI',
+      ]);
+      final total = result.fold<double>(0, (sum, i) => sum + (i.precioTotal ?? 0));
+      expect(total, closeTo(13.71, 0.001));
+    });
+
+    test('una cabecera de tabla a mitad de ticket no borra productos ya leídos', () {
+      final result = parseReceiptLines('''
+LECHE ENTERA 1L   0,95
+EUROS/TOT   ING.CLUB
+PAN BARRA   0,60
+''');
+      expect(result.map((r) => r.descripcion), ['LECHE ENTERA 1L', 'PAN BARRA']);
+    });
+
     test('no corta por productos que llevan "TOTAL" en medio del nombre', () {
       final result = parseReceiptLines('''
 COLGATE TOTAL PROTECCION   3,15

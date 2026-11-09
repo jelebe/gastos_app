@@ -118,6 +118,15 @@ bool _isHardStopLine(String upperLine) {
   return false;
 }
 
+/// Cabecera de la tabla de productos: "UNID CODIGO DESCRIPCION TOTAL" o, en
+/// Eroski, "EUROS/TOT ING.CLUB". Marca dónde empiezan los artículos, así que
+/// lo que se haya ido leyendo antes sin precio (nombre de la tienda, barrio,
+/// línea de caja y fecha...) era cabecera del ticket, no productos.
+final _tableHeaderPattern = RegExp(r'\bUNID\.?\s+C.DIGO\b|\bC.DIGO\b.*\bDESCRIPCION\b|\bEUROS?\s*\/\s*TOT|\bING\.?\s*CLUB\b');
+
+bool _isTableHeaderLine(String upperLine) =>
+    _tableHeaderPattern.hasMatch(upperLine) || _compact(upperLine).contains('DESCRIPCION');
+
 /// `true` si alguna palabra de la línea tiene mayúsculas y minúsculas
 /// mezcladas de forma errática (p.ej. "AHORRaMaS"): así es como suele salir
 /// el logo estilizado del comercio al pasar por el OCR, nunca un producto
@@ -369,6 +378,12 @@ List<ParsedTicketLine> parseReceiptLines(String rawText) {
     // A partir del total ya no hay más productos: lo que sigue es forma de
     // pago, desglose de IVA, número de artículos, código de factura...
     if (_isHardStopLine(upper)) break;
+    if (_isTableHeaderLine(upper)) {
+      // Solo si aún no hay ningún producto con precio: una cabecera repetida
+      // a mitad de ticket no debe llevarse por delante artículos ya leídos.
+      if (result.every((l) => l.precioTotal == null)) result.clear();
+      continue;
+    }
     if (isNoiseLine(line)) continue;
     // Resto huérfano de peso/cantidad (p.ej. "1,940 Kg x 13,99€/Kg") que no
     // se fusionó con la línea anterior porque esta ya tenía su propio

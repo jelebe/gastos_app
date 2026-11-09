@@ -8,6 +8,7 @@ import 'package:image_picker/image_picker.dart';
 import '../models/ticket_line_item.dart';
 import '../services/household_repository.dart';
 import '../utils/product_classifier.dart';
+import '../utils/store_detector.dart';
 import '../utils/ticket_parser.dart';
 import 'confirm_ticket_screen.dart';
 
@@ -44,8 +45,13 @@ class _CaptureScreenState extends State<CaptureScreen> {
       }
       imagePath = photo.path;
 
-      // Categorías y lo aprendido se piden ya, mientras se lee la foto.
-      final datos = (widget.repository.loadCategories(), widget.repository.loadLearnedLines()).wait;
+      // Categorías, tiendas y lo aprendido se piden ya, mientras se lee la foto.
+      final datos = (
+        widget.repository.loadCategories(),
+        widget.repository.loadLearnedLines(),
+        widget.repository.loadStores(),
+        widget.repository.loadStoreFingerprints(),
+      ).wait;
       // Si fallan antes de llegar a esperarlos, que no quede como error suelto:
       // ya se recoge abajo, en el await.
       datos.ignore();
@@ -63,7 +69,7 @@ class _CaptureScreenState extends State<CaptureScreen> {
       // lectura a partir de la posición (x, y) de cada línea reconocida.
       final rawText = _reconstructReadingOrder(result);
 
-      final (categories, aprendidas) = await datos;
+      final (categories, aprendidas, tiendas, huellasAprendidas) = await datos;
       final (:items, :descartadas) =
           _buildLineItems(rawText, ProductClassifier(categorias: categories, aprendidas: aprendidas));
 
@@ -75,6 +81,8 @@ class _CaptureScreenState extends State<CaptureScreen> {
             items: items,
             descartadas: descartadas,
             esEscaneo: true,
+            comercioInicial: detectStore(rawText, tiendas: tiendas, aprendidas: huellasAprendidas),
+            huellasTienda: storeFingerprints(rawText),
           ),
         ),
       );

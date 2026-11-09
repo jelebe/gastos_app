@@ -10,6 +10,7 @@ import '../models/store.dart';
 import '../models/ticket_line_item.dart';
 import '../models/transaction_summary.dart';
 import '../utils/product_classifier.dart';
+import '../utils/store_detector.dart';
 import '../utils/text_normalizer.dart';
 
 /// Las dos personas del hogar. El orden importa solo aquí dentro: el saldo se
@@ -479,7 +480,62 @@ class HouseholdRepository {
     } else {
       await col.doc(id).update({'nombre': limpio, ...grupoData});
     }
+
+    // Lo aprendido para reconocerla también va con el nombre nuevo; si no,
+    // dejaría de ponerse sola al escanear.
+    final huellas = await (await _huellasCol).where('tienda', isEqualTo: anterior).get();
+    await learnStoreFingerprints([for (final d in huellas.docs) d.data()['huella'] as String? ?? ''], limpio);
+    // Si solo cambian mayúsculas o tildes el documento es el mismo, y no hay
+    // que borrarlo.
+    final viejas = [
+      for (final d in huellas.docs)
+        if (d.id != LearnedFingerprint.docId(d.data()['huella'] as String? ?? '', limpio)) d.reference,
+    ];
+    for (var i = 0; i < viejas.length; i += 400) {
+      final batch = FirebaseFirestore.instance.batch();
+      for (final ref in viejas.skip(i).take(400)) {
+        batch.delete(ref);
+      }
+      await batch.commit();
+    }
     return tickets.docs.length;
+  }
+
+  Future<CollectionReference<Map<String, dynamic>>> get _huellasCol async =>
+      (await householdRef).collection('huellasTienda');
+
+  /// Lo aprendido para reconocer la tienda de un ticket escaneado, para
+  /// [detectStore].
+  Future<List<LearnedFingerprint>> loadStoreFingerprints() async {
+    final snap = await (await _huellasCol).get();
+    return [
+      for (final doc in snap.docs)
+        if (doc.data() case {'huella': final String huella, 'tienda': final String tienda})
+          LearnedFingerprint(huella: huella, tienda: tienda, veces: (doc.data()['veces'] as num?)?.toInt() ?? 1),
+    ];
+  }
+
+  /// Apunta que estas huellas ([storeFingerprints]) son de [tienda], para
+  /// ponerla sola la próxima vez que se escanee un ticket suyo.
+  Future<void> learnStoreFingerprints(Iterable<String> huellas, String tienda) async {
+    final col = await _huellasCol;
+    final lista = huellas.where((h) => h.isNotEmpty).toSet().toList();
+    for (var i = 0; i < lista.length; i += 400) {
+      final batch = FirebaseFirestore.instance.batch();
+      for (final huella in lista.skip(i).take(400)) {
+        batch.set(
+          col.doc(LearnedFingerprint.docId(huella, tienda)),
+          {
+            'huella': huella,
+            'tienda': tienda,
+            'veces': FieldValue.increment(1),
+            'actualizado': FieldValue.serverTimestamp(),
+          },
+          SetOptions(merge: true),
+        );
+      }
+      await batch.commit();
+    }
   }
 
   Future<CollectionReference<Map<String, dynamic>>> get _aprendidasCol async =>
